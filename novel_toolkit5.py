@@ -251,9 +251,9 @@ def main() -> None:  # noqa: C901
 
             # Write outputs
             if md_fh and args.format in {"md", "both"} and args.mode != "entities":
-                md_fh.write(f"**{heading}**{response}")
+                md_fh.write(f"**{heading}**\n\n{response}\n")
             if json_fh and args.format in {"json", "both"} and data is not None:
-                json_fh.write(json.dumps(data, ensure_ascii=False) + "")
+                json_fh.write(json.dumps(data, ensure_ascii=False) + "\n")
 
             # Update entity memory for continuity
             if args.mode == "entities" and isinstance(data, dict):
