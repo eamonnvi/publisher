@@ -68,9 +68,10 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     ),
     # ——— entity extraction ———
     "entities_json": (
-        "Extract structured facts from '{heading}'. Return ONLY JSON:\n"
-        "{{\n  'section_heading': '{heading}',\n  'characters': [...],\n  'pov_character': <string|null>,\n  'themes': [...],\n  'locations': [...],\n  'timestamp': <string|null>\n}}\n\n"
-        "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    "Extract structured facts from '{heading}'. "
+    "Return ONLY a single JSON object with the following fields: "
+    "'section_heading', 'characters', 'pov_character', 'themes', 'locations', 'timestamp'.\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     # ——— continuity ———
     "continuity_md": (
@@ -180,6 +181,17 @@ def call_openai(model: str, prompt: str, max_out: int) -> str:
     )
     return rsp.choices[0].message.content.strip()
 
+def extract_json_from_response(response: str) -> dict:
+    import re, json
+
+    # Try ```json ... ``` first
+    match = re.search(r"```json\s*(\{.*\})\s*```", response, re.DOTALL)
+    if not match:
+        # Try generic triple-backtick code block
+        match = re.search(r"```\s*(\{.*\})\s*```", response, re.DOTALL)
+    json_str = match.group(1).strip() if match else response.strip()
+    return json.loads(json_str)
+
 ################################################################################
 # Main                                                                          #
 ################################################################################
@@ -201,7 +213,22 @@ def main() -> None:  # noqa: C901
     p.add_argument("--heading-regex")
     p.add_argument("--out-dir", type=Path)
     p.add_argument("--verbose", action="store_true")
+    p.add_argument("--entities-file", type=Path, help="Path to entities.jsonl for continuity mode")
     args = p.parse_args()
+
+    print(f"[debug] args.mode: {args.mode}, args.entities_file: {args.entities_file}")
+
+    # Load entity_memory from file if --entities-file is provided in continuity mode
+    entity_memory = []
+    if args.mode == "continuity" and args.entities_file:
+        with open(args.entities_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entity_memory.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        print(f"[debug] Loaded {len(entity_memory)} entities from {args.entities_file}")
+    # ...rest of your main() function...
 
     if not os.getenv("OPENAI_API_KEY"):
         sys.exit("[error] OPENAI_API_KEY not set")
@@ -238,12 +265,20 @@ def main() -> None:  # noqa: C901
     json_fh = open(jsonl_path, "w", encoding="utf-8") if args.format in {"json", "both"} else None
 
     processed = 0
-    entity_memory: List[dict] = []  # grows across sections for continuity checks
+    #entity_memory: List[dict] = []  # grows across sections for continuity checks
 
     try:
-        for heading, body in tqdm(sections, desc="Processing", unit="section"):
-            # Select prior facts when running continuity mode
-            prior_json = json.dumps(entity_memory, ensure_ascii=False) if args.mode == "continuity" else None
+        for i, (heading, body) in enumerate(tqdm(sections, desc="Processing", unit="section")):
+            if args.mode == "continuity" and args.entities_file:
+                prior_entities = entity_memory[:i]
+                print(f"[debug] Section {i+1} ({heading}): {len(prior_entities)} prior facts")
+                # Optionally, print a sample prior entity:
+                if prior_entities:
+                    print(f"[debug] Sample prior entity: {prior_entities[-1]}")
+                prior_json = json.dumps(prior_entities, ensure_ascii=False)
+            else:
+                prior_json = json.dumps(entity_memory, ensure_ascii=False) if args.mode == "continuity" else None
+
             prompt = build_prompt(
                 args.mode, heading, body, args.format, prior=prior_json
             )
@@ -266,6 +301,7 @@ def main() -> None:  # noqa: C901
             try:
                 response = call_openai(args.model, prompt, args.max_tokens_out)
                 print(f"\n[{heading}]\n{response}\n")
+                print(f"[entities debug] {response}")   # <--- Add here
             except Exception as exc:
                 sys.stderr.write(f"[warn] OpenAI error on '{heading}': {exc}")
                 continue
@@ -273,11 +309,9 @@ def main() -> None:  # noqa: C901
             # Handle JSON parsing for relevant modes
             if args.mode in {"entities", "continuity"}:
                 try:
-                    data = json.loads(response)
-                except json.JSONDecodeError:
+                    data = extract_json_from_response(response)
+                except Exception:
                     data = {"section_heading": heading, "raw": response}
-            else:
-                data = None
 
             # Write outputs
             if md_fh and args.format in {"md", "both"} and args.mode != "entities":
@@ -292,6 +326,7 @@ def main() -> None:  # noqa: C901
                 # Still want entities memory to grow: run extraction pass as well
                 ent_prompt = build_prompt("entities", heading, body, fmt="json")
                 ent_res = call_openai(args.model, ent_prompt, 512)
+                print(f"[entities debug] {ent_res}")  # <--- Add here
                 try:
                     entity_memory.append(json.loads(ent_res))
                 except json.JSONDecodeError:
