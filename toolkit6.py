@@ -69,7 +69,7 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     # ——— entity extraction ———
     "entities_json": (
         "Extract structured facts from '{heading}'. Return ONLY JSON:\n"
-        "{\n  'section_heading': '{heading}',\n  'characters': [...],\n  'pov_character': <string|null>,\n  'themes': [...],\n  'locations': [...],\n  'timestamp': <string|null>\n}\n\n"
+        "{{\n  'section_heading': '{heading}',\n  'characters': [...],\n  'pov_character': <string|null>,\n  'themes': [...],\n  'locations': [...],\n  'timestamp': <string|null>\n}}\n\n"
         "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     # ——— continuity ———
@@ -130,16 +130,46 @@ def num_tokens(model: str, *chunks: str) -> int:
     return sum(len(enc.encode(c)) for c in chunks)
 
 
-def build_prompt(mode: str, heading: str, body: str, fmt: str, prior: str | None = None) -> str:
+def build_prompt(
+    mode: str,
+    heading: str,
+    body: str,
+    fmt: str,
+    prior: str | None = None
+) -> str:
+    """
+    Selects the appropriate prompt template based on mode and format,
+    fills in heading/body (and prior if needed), and returns the final prompt string.
+    """
+    # Mapping of logical modes to prompt template keys
     key_map = {
         "critique": "critique_json" if fmt in {"json", "both"} else "critique_md",
         "entities": "entities_json",
         "continuity": "continuity_json" if fmt in {"json", "both"} else "continuity_md",
         "copyedit": "copyedit_json" if fmt in {"json", "both"} else "copyedit_md",
+        # direct modes: concise, discursive, overview, inline-edit
     }
-    template = PROMPT_TEMPLATES.get(key_map.get(mode, mode), PROMPT_TEMPLATES[mode])
-    return template.format(heading=heading, body=body, prior_entities=prior or "[]")
 
+    # Determine which template key to use
+    template_key = key_map.get(mode, mode)  # fallback to mode itself for "concise", etc.
+
+    # Robust error handling with a descriptive message
+    if template_key not in PROMPT_TEMPLATES:
+        raise KeyError(
+            f"\n[error] No prompt template for mode '{mode}' (key '{template_key}')."
+            f"\nAvailable templates: {list(PROMPT_TEMPLATES.keys())}"
+            f"\nCheck your --mode ('{mode}') and --format ('{fmt}') arguments."
+        )
+
+    template = PROMPT_TEMPLATES[template_key]
+
+    # Compose the prompt, supplying prior_entities if required by the template
+    prompt = template.format(
+        heading=heading,
+        body=body,
+        prior_entities=prior or "[]"
+    )
+    return prompt
 
 def call_openai(model: str, prompt: str, max_out: int) -> str:
     rsp = openai.chat.completions.create(
