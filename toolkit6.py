@@ -44,39 +44,51 @@ except ImportError:
 PROMPT_TEMPLATES: Dict[str, str] = {
     # ——— summaries ———
     "concise": (
-        "Summarise the following section of a novel entitled '{heading}'. "
-        "Write in concise British English prose, avoiding spoilers and revealing only essential plot details.\n\n"
-        "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    "Summarise the following section of a novel entitled '{heading}'. "
+    "Include major events, character actions, and information that may be important for the overall plot, including developments that might be relevant in later chapters. "
+    "Flag any details that appear to set up future revelations, red herrings, or narrative misdirection. "
+    "Write in clear British English prose.\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     "discursive": (
-        "Provide an **expansive synopsis** of the section titled '{heading}'. "
-        "Explain character motivations, thematic significance and any subtext (~400–600 words). "
-        "Avoid future spoilers.\n\n"
-        "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    "Provide an in-depth, analytical synopsis of the section titled '{heading}'. "
+    "Discuss character motivations, internal and external conflicts, thematic significance, subtext, and narrative strategies. "
+    "Comment on the pacing, use of suspense, and effectiveness of red herrings or misleading clues. "
+    "Highlight any details that may have later narrative impact (including possible foreshadowing, Chekhov’s guns, or setup for twists). "
+    "Consider the structure, tone, and any shifts in perspective. Do not omit spoilers or narrative revelations.\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     # ——— developmental critique ———
     "critique_md": (
-        "You are an experienced developmental editor. Evaluate '{heading}'.\n\n"
-        "1. **Strengths** (voice, pacing, originality).\n"
-        "2. **Weaknesses** (inconsistencies, clichés, redundancy).\n"
-        "3. **Concrete improvements** with examples.\n\n"
-        "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    "You are an experienced developmental editor. Evaluate the section titled '{heading}' as follows:\n\n"
+    "1. **Strengths:** Comment on voice, pacing, originality, narrative structure, and style.\n"
+    "2. **Weaknesses:** Note inconsistencies, clichés, narrative slack, unresolved setups, and anything that may undermine suspense or thematic unity.\n"
+    "3. **Genre fit and innovation:** Discuss how the section aligns with or subverts expectations for its genre.\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     "critique_json": (
         "You are an experienced developmental editor. Return STRICT JSON with keys 'strengths', 'weaknesses', 'improvements' – each an array of strings.\n\n"
         "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
+    # --- improvement suggestions ---
+    "improvement_suggestions": (
+    "For the section titled '{heading}', list specific, actionable suggestions for revision. Focus on improving clarity, deepening character motivation, strengthening suspense, tightening pacing, and resolving ambiguities. "
+    "Include examples or sample rewrites if relevant.\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    ),
     # ——— entity extraction ———
     "entities_json": (
-    "Extract structured facts from '{heading}'. "
-    "Return ONLY a single JSON object with the following fields: "
-    "'section_heading', 'characters', 'pov_character', 'themes', 'locations', 'timestamp'.\n\n"
+    "Extract structured facts from the section titled '{heading}'. "
+    "Return only a single valid JSON object with these keys: "
+    "'section_heading', 'characters', 'pov_character', 'themes', 'locations', 'timestamp'. "
+    "Do not include explanations, markdown, or any non-JSON output.\n\n"
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     # ——— continuity ———
     "continuity_md": (
-        "You are a continuity editor. Compare the **current section** to **prior facts** for contradictions (dates, ages, locations, etc.).\n\n"
-        "### Prior facts\n```json\n{prior_entities}\n```\n\n### Current section\n{body}\n"
+    "You are a continuity editor. Compare the **current section** to the following **prior facts**. "
+    "Flag any contradictions (dates, ages, locations, character actions, etc.), and note any ambiguous or potentially inconsistent elements (even if not outright contradictions).\n\n"
+    "### Prior facts\n```json\n{prior_entities}\n```\n\n### Current section\n{body}\n"
     ),
     "continuity_json": (
         "Compare current section to prior facts. Return ONLY a JSON array of inconsistency strings (empty if none).\n\n"
@@ -93,8 +105,10 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     ),
     # ——— overview ———
     "overview": (
-        "Write a 2 000–2 500‑word editorial overview of the manuscript below covering plot, character, themes, style, and issues.\n\n"
-        "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    "Write a 2,000–2,500-word editorial overview of the manuscript below. "
+    "Cover plot, character arcs, themes, style, structure, pacing, genre conventions (and subversions), and any continuity or consistency issues observed across sections. "
+    "Include major narrative strengths and weaknesses, and comment on possible revisions or further development.\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
 }
 
@@ -216,7 +230,7 @@ def main() -> None:  # noqa: C901
     p.add_argument("--entities-file", type=Path, help="Path to entities.jsonl for continuity mode")
     args = p.parse_args()
 
-    print(f"[debug] args.mode: {args.mode}, args.entities_file: {args.entities_file}")
+    #print(f"[debug] args.mode: {args.mode}, args.entities_file: {args.entities_file}")
 
     # Load entity_memory from file if --entities-file is provided in continuity mode
     entity_memory = []
@@ -227,7 +241,7 @@ def main() -> None:  # noqa: C901
                     entity_memory.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-        print(f"[debug] Loaded {len(entity_memory)} entities from {args.entities_file}")
+        #print(f"[debug] Loaded {len(entity_memory)} entities from {args.entities_file}")
     # ...rest of your main() function...
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -271,7 +285,7 @@ def main() -> None:  # noqa: C901
         for i, (heading, body) in enumerate(tqdm(sections, desc="Processing", unit="section")):
             if args.mode == "continuity" and args.entities_file:
                 prior_entities = entity_memory[:i]
-                print(f"[debug] Section {i+1} ({heading}): {len(prior_entities)} prior facts")
+                #print(f"[debug] Section {i+1} ({heading}): {len(prior_entities)} prior facts")
                 # Optionally, print a sample prior entity:
                 if prior_entities:
                     print(f"[debug] Sample prior entity: {prior_entities[-1]}")
@@ -301,7 +315,7 @@ def main() -> None:  # noqa: C901
             try:
                 response = call_openai(args.model, prompt, args.max_tokens_out)
                 print(f"\n[{heading}]\n{response}\n")
-                print(f"[entities debug] {response}")   # <--- Add here
+                #print(f"[entities debug] {response}")   # <--- Add here
             except Exception as exc:
                 sys.stderr.write(f"[warn] OpenAI error on '{heading}': {exc}")
                 continue
@@ -326,7 +340,7 @@ def main() -> None:  # noqa: C901
                 # Still want entities memory to grow: run extraction pass as well
                 ent_prompt = build_prompt("entities", heading, body, fmt="json")
                 ent_res = call_openai(args.model, ent_prompt, 512)
-                print(f"[entities debug] {ent_res}")  # <--- Add here
+                #print(f"[entities debug] {ent_res}")  # <--- Add here
                 try:
                     entity_memory.append(json.loads(ent_res))
                 except json.JSONDecodeError:
