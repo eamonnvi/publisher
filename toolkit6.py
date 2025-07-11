@@ -110,6 +110,11 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     "Include major narrative strengths and weaknesses, and comment on possible revisions or further development.\n\n"
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
+    "detailed-summary": (
+    "Write a 10,000–12,500-word detailed summary of the manuscript below. "
+    "Cover plot, character arcs, themes, style, structure, pacing, genre conventions (and subversions).\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    ),
 }
 
 ################################################################################
@@ -216,7 +221,8 @@ def main() -> None:  # noqa: C901
 
     modes = [
         "concise", "discursive", "critique", "entities", "continuity",
-        "overview", "inline-edit", "copyedit",
+        "overview", "inline-edit", "copyedit", "improvement_suggestions",
+        "detailed-summary",
     ]
     p.add_argument("--mode", choices=modes, default="concise")
     p.add_argument("--whole", action="store_true", help="Treat entire file as one section")
