@@ -111,7 +111,7 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     "detailed-summary": (
-    "Write a 10,000–12,500-word detailed summary of the manuscript below. "
+    "Write a 5,000–10,000-word chapter-by-chapter summary of the manuscript below. "
     "Cover plot, character arcs, themes, style, structure, pacing, genre conventions (and subversions).\n\n"
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
@@ -184,6 +184,8 @@ def build_prompt(
     template = PROMPT_TEMPLATES[template_key]
 
     # Compose the prompt, supplying prior_entities if required by the template
+    # In build_prompt(), dynamically adjust heading label:
+    heading_label = "manuscript" if heading.lower() == "full manuscript" else "section"
     prompt = template.format(
         heading=heading,
         body=body,
