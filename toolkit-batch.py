@@ -121,6 +121,42 @@ PROMPT_TEMPLATES: Dict[str, str] = {
 # Helper functions                                                              #
 ################################################################################
 
+
+def prepend_cli_metadata_to_output(output_path: Path, args: argparse.Namespace, mode: str):
+    """
+    Prepend CLI command, timestamp, and output file path to the beginning of the report.
+    Args:
+        output_path (Path): Path to the output file.
+        args (argparse.Namespace): The parsed command-line arguments.
+        mode (str): The current mode (overview, meta-summary, etc.).
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    output_abs_path = output_path.resolve()
+
+    # Reconstruct the CLI command as accurately as possible
+    # Filter out arguments with None/False values for clarity
+    arglist = []
+    for key, value in vars(args).items():
+        if key not in ("draft", "out_dir") and value not in (None, False):
+            if isinstance(value, Path):
+                value = str(value)
+            arglist.append(f"--{key.replace('_', '-')}" + (f" {value}" if value is not True else ""))
+    cli_command = f"python3 toolkit-batch.py {args.draft} " + " ".join(arglist)
+
+    header = (
+        f"# {mode.capitalize()} Report\n\n"
+        f"**Generated:** {timestamp}\n"
+        f"**Output file:** `{output_abs_path}`\n"
+        f"**CLI command:**\n\n"
+        f"```bash\n{cli_command}\n```\n\n"
+        "---\n\n"
+    )
+
+    # Prepend to file
+    original_text = output_path.read_text(encoding="utf-8")
+    with output_path.open("w", encoding="utf-8") as f:
+        f.write(header + original_text)
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -403,6 +439,10 @@ def main() -> None:  # noqa: C901
 
     if processed == 0:
         sys.exit("[error] No sections processed. Check headings, token limits, or model window.")
+
+    # <--- Add here:
+    if md_fh and args.format in {"md", "both"}:
+        prepend_cli_metadata_to_output(md_path, args, args.mode)
 
     print(f"[ok] Wrote {processed}/{len(sections)} sections to {out_dir.resolve()}")
     if md_fh and args.format in {"md", "both"}:
