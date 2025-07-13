@@ -45,8 +45,7 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     # ——— summaries ———
     "concise": (
     "Summarise the following section of a novel entitled '{heading}'. "
-    "Include major events, character actions, and information that may be important for the overall plot, including developments that might be relevant in later chapters. "
-    "Flag any details that appear to set up future revelations, red herrings, or narrative misdirection. "
+    "Include major events, character actions, and information that may be important for the overall plot. "
     "Write in clear British English prose.\n\n"
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
@@ -111,8 +110,9 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     "detailed-summary": (
-    "Write a 5,000–10,000-word chapter-by-chapter summary of the manuscript below. "
-    "Cover plot, character arcs, themes, style, structure, pacing, genre conventions (and subversions).\n\n"
+    "Write a detailed chapter-by-chapter summary of the manuscript below. "
+    "Include major events, character actions, and information that may be important for the overall plot. "
+    "Write in clear British English prose.\n\n"
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
 }
@@ -141,6 +141,7 @@ def prepend_cli_metadata_to_output(output_path: Path, args: argparse.Namespace, 
             if isinstance(value, Path):
                 value = str(value)
             arglist.append(f"--{key.replace('_', '-')}" + (f" {value}" if value is not True else ""))
+
     cli_command = f"python3 toolkit-batch.py {args.draft} " + " ".join(arglist)
 
     header = (
@@ -249,6 +250,16 @@ def extract_json_from_response(response: str) -> dict:
     json_str = match.group(1).strip() if match else response.strip()
     return json.loads(json_str)
 
+def split_text_every_n_words(text, n=4000):
+    """
+    Splits a long text into sections of approximately n words.
+    Yields (section_heading, section_text) tuples.
+    """
+    words = text.split()
+    for i in range(0, len(words), n):
+        chunk = words[i:i + n]
+        yield f"Section {i // n + 1}", " ".join(chunk)    
+
 def batch_sections_by_token_limit(sections, max_tokens, model_name, safety_margin=2048):
     """
     Yield (batch_heading, batch_body) tuples, each with total tokens <= max_tokens - safety_margin.
@@ -272,6 +283,36 @@ def batch_sections_by_token_limit(sections, max_tokens, model_name, safety_margi
         batch_body = "\n\n".join([s[1] for s in current_batch])
         yield (batch_heading, batch_body)
 
+def write_meta_summary(batch_reports_path: Path, output_path: Path, model="gpt-4.1-mini", max_tokens_out=8192):
+    """
+    Reads the batch summary markdown file, constructs a meta-summary prompt,
+    and writes the meta-summary to output_path.
+    """
+    batch_text = batch_reports_path.read_text(encoding="utf-8")
+
+    prompt = (
+        "You are an expert literary editor. Below are detailed summaries of a novel in several large batches.\n\n"
+        "Write a unified editorial meta-summary (5,000–10,000 words) covering the entire narrative: plot, character arcs, themes, strengths, weaknesses, continuity, pacing, and suggestions for further development. "
+        "Synthesize all batch summaries; avoid repetition, and highlight connections across batches. "
+        "Write in clear, professional British English prose.\n\n"
+        "----- BEGIN BATCH SUMMARIES -----\n"
+        f"{batch_text}\n"
+        "----- END BATCH SUMMARIES -----"
+    )
+
+    rsp = openai.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=max_tokens_out,
+    )
+    meta_summary = rsp.choices[0].message.content.strip()
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(meta_summary)
+
+    print(f"[ok] Meta-summary written to {output_path}")
+
 ################################################################################
 # Main                                                                          #
 ################################################################################
@@ -283,7 +324,7 @@ def main() -> None:  # noqa: C901
     modes = [
         "concise", "discursive", "critique", "entities", "continuity",
         "overview", "inline-edit", "copyedit", "improvement_suggestions",
-        "detailed-summary",
+        "detailed-summary", "meta-summary"
     ]
     p.add_argument("--mode", choices=modes, default="concise")
     p.add_argument("--whole", action="store_true", help="Treat entire file as one section")
@@ -296,6 +337,17 @@ def main() -> None:  # noqa: C901
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--entities-file", type=Path, help="Path to entities.jsonl for continuity mode")
     p.add_argument("--batch", action="store_true", help="Enable batching of sections by token limit")
+    p.add_argument("--meta-summary", action="store_true", help="Generate a meta-summary from batch output")
+    p.add_argument("--batch-reports-file", type=Path, help="Path to markdown file with batch summaries")
+    p.add_argument("--split-every-n-words", type=int, help="Force split text into sections of N words")
+    args = p.parse_args()
+
+    if args.meta_summary:
+        if not args.batch_reports_file:
+            sys.exit("[error] Please specify --batch-reports-file for meta-summary.")
+        output_path = Path("meta-summary.md")  # or to your out_dir as desired
+        write_meta_summary(args.batch_reports_file, output_path, model=args.model, max_tokens_out=args.max_tokens_out)
+        return
     args = p.parse_args()
 
     # Enforce mutual exclusion between --whole and --batch
@@ -333,7 +385,9 @@ def main() -> None:  # noqa: C901
     text = read_text(args.draft)
 
         # Slice draft into sections
-    if args.whole:
+    if args.split_every_n_words:
+        sections = list(split_text_every_n_words(text, n=args.split_every_n_words))
+    elif args.whole:
         sections = [("Full Manuscript", text.strip())]
     else:
         heading_rx = compile_heading_regex(args.heading_regex)
