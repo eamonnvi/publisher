@@ -298,6 +298,10 @@ def main() -> None:  # noqa: C901
     p.add_argument("--batch", action="store_true", help="Enable batching of sections by token limit")
     args = p.parse_args()
 
+    # Enforce mutual exclusion between --whole and --batch
+    if args.whole and args.batch:
+        sys.exit("[error] Do not use --whole and --batch together. Choose one or neither.")
+
     #print(f"[debug] args.mode: {args.mode}, args.entities_file: {args.entities_file}")
 
     # Load entity_memory from file if --entities-file is provided in continuity mode
