@@ -44,9 +44,9 @@ except ImportError:
 PROMPT_TEMPLATES: Dict[str, str] = {
     # ——— summaries ———
     "concise": (
-    "Summarise the following section of a novel entitled '{heading}'. "
-    "Include major events, character actions, and information that may be important for the overall plot, including developments that might be relevant in later chapters. "
-    "Flag any details that appear to set up future revelations, red herrings, or narrative misdirection. "
+    "Summarise the following section of a novel entitled '{heading}'."
+    "Include major events, character actions, and information that may be important for the overall plot."
+    "Suggest a more suitable title for the chapter"
     "Write in clear British English prose.\n\n"
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
@@ -265,7 +265,7 @@ def main() -> None:  # noqa: C901
     p.add_argument("--mode", choices=modes, default="concise")
     p.add_argument("--whole", action="store_true", help="Treat entire file as one section")
     p.add_argument("--format", choices=["md", "json", "both"], default="md")
-    p.add_argument("--model", default="gpt-4o-mini")
+    p.add_argument("--model", default="gpt-4.1-mini", choices=["gpt-4.1-mini", "gpt-4.1"], help="OpenAI model to use")
     p.add_argument("--max-tokens-out", type=int, default=1024)
     p.add_argument("--max-section-tokens", type=int, default=120_000)
     p.add_argument("--heading-regex")
@@ -312,11 +312,13 @@ def main() -> None:  # noqa: C901
         sections = list(iter_sections(text, heading_rx))
 
     # Context‑window map (extend as new models are added)
-    CTX_LIMIT = {
-        "gpt-4o-mini": 128_000,
-        "gpt-4o": 128_000,
-        "gpt-4.1-mini": 1_000_000,
-    }.get(args.model, 128_000)
+    CTX_LIMITS = {
+    "gpt-4.1-mini": 1_000_000,
+    "gpt-4.1": 128_000,
+    }
+    CTX_LIMIT = CTX_LIMITS.get(args.model)
+        if CTX_LIMIT is None:
+    sys.exit(f"[error] Model '{args.model}' not supported by this script.")
 
     # Prepare optional files
     md_fh = open(md_path, "w", encoding="utf-8") if args.format in {"md", "both"} else None
