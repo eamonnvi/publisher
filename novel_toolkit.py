@@ -252,8 +252,11 @@ def call_llm(
         kwargs = {
             "model": m,
             "input": prompt,
-            "temperature": 0.3,
             "max_output_tokens": max_out,
+            "generation_config": {  # <- move knobs here for GPT-5 Responses
+                "temperature": 0.3,
+                # you can add others here later: top_p, presence_penalty, frequency_penalty
+            },
         }
         if want_json:
             kwargs["response_format"] = {"type": "json_object"}
