@@ -97,7 +97,10 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     # ——— copy‑edit ———
     "copyedit_md": (
         "## Identity\nYou are a line‑by‑line copy editor in a British literary publishing house.\n\n"
-        "## Task\nIdentify typos, grammar issues, redundancies, repetitions, comma splices.\nInside single‑quoted dialogue flag typos only.\n\n## Prohibitions\nDo not break sentences, reduce adverbs, spot clichés, or flag contractions.\n\n## Output\nBulleted Markdown: line number, snippet, issue, suggestion.\n\n----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+        "## Task\nIdentify typos, grammar issues, redundancies, repetitions.\n\n"
+        "## Prohibitions\nDo not break sentences, reduce the number of adverbs, spot clichés, or flag contractions.\n\n"
+        "## Output\nBulleted Markdown: line number, snippet, issue, suggestion.\n\n"
+        "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
     "copyedit_json": (
         "(Same identity/task) Return JSON array of objects {line_number,int; original,str; issue,str; suggestion,str}.\n\n"
@@ -113,6 +116,19 @@ PROMPT_TEMPLATES: Dict[str, str] = {
     "detailed-summary": (
     "Write a 5,000–10,000-word chapter-by-chapter summary of the manuscript below. "
     "Cover plot, character arcs, themes, style, structure, pacing, genre conventions (and subversions).\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    ),
+    "sensitivity-analysis": (
+    "Read the sexually explicit sections of the manuscript below."
+    "Assess whether they are justified by the period in which the narrative is set and the situations in which the characters find themselves.\n\n"
+    "Please suggest rewordings for lines which are borderline un/acceptable.\n\n"
+    "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
+    ),
+    "plot-points": (
+    "Is the narrative of the current draft presented in such a way that the attentive reader would guess that Mrs Nairn and the glamourous female film star are Sheena in disguise and that the presence of Marlboro cigarettes marks Katrin?"
+    "The fact that Ulrike declines cigarettes in the Paddington Green scene indicates that the character in this scene really is Ulrike and not Katrin." 
+    "Is it also possible for the reader to infer that Grace is developing a lesbian attraction to Ulrike in the Newnham College high table scene?"
+    "Finally, please identify any plot points that don't work or could be more sharply written.\n\n"    
     "----- BEGIN SECTION -----\n{body}\n----- END SECTION -----"
     ),
 }
@@ -260,7 +276,7 @@ def main() -> None:  # noqa: C901
     modes = [
         "concise", "discursive", "critique", "entities", "continuity",
         "overview", "inline-edit", "copyedit", "improvement_suggestions",
-        "detailed-summary",
+        "detailed-summary", "sensitivity-analysis", "plot-points",
     ]
     p.add_argument("--mode", choices=modes, default="concise")
     p.add_argument("--whole", action="store_true", help="Treat entire file as one section")
@@ -317,8 +333,8 @@ def main() -> None:  # noqa: C901
     "gpt-4.1": 128_000,
     }
     CTX_LIMIT = CTX_LIMITS.get(args.model)
-        if CTX_LIMIT is None:
-    sys.exit(f"[error] Model '{args.model}' not supported by this script.")
+    if CTX_LIMIT is None:
+        sys.exit(f"[error] Model '{args.model}' not supported by this script.")
 
     # Prepare optional files
     md_fh = open(md_path, "w", encoding="utf-8") if args.format in {"md", "both"} else None

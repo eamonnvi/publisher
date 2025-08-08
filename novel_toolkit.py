@@ -235,77 +235,148 @@ def call_llm(
     engine: str,
     fallback_model: str,
     verbose: bool = False,
-) -> str:
+    dump_raw_dir: str | None = None,
+    heading: str | None = None,
+) -> str | None:
     """
-    Calls either Responses (preferred for gpt-5*) or Chat Completions (legacy).
-    If want_json, requests structured JSON from the model.
-    On failure, falls back to `fallback_model`.
+    Unified caller with robust extraction + optional raw dumps.
+
+    Returns a string (possibly empty) on success, or None on total failure.
     """
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    def _dump_raw(tag: str, obj: object):
+        if not dump_raw_dir:
+            return
+        try:
+            _Path(dump_raw_dir).mkdir(parents=True, exist_ok=True)
+            fname = f"raw_{tag}_{(heading or 'section').replace(' ', '_')}.json"
+            fpath = _Path(dump_raw_dir) / fname
+            # best-effort JSON dump; fall back to str()
+            try:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    _json.dump(obj, f, ensure_ascii=False, default=lambda x: getattr(x, "__dict__", str(x)))
+            except Exception:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(str(obj))
+            if verbose:
+                sys.stderr.write(f"[debug] dumped raw response to {fpath}\n")
+        except Exception as _e:
+            if verbose:
+                sys.stderr.write(f"[debug] failed to dump raw: {_e}\n")
+
     def use_responses(m: str, eng: str) -> bool:
         if eng == "responses":
             return True
         if eng == "chat":
             return False
-        return m.startswith("gpt-5")  # auto
+        return m.startswith("gpt-5")  # auto route
 
-    def responses_call(m: str) -> str:
+    # ---------- Extractors ----------
+
+    def _extract_responses_text(r) -> str:
+        # 1) consolidated helper, if present
+        t = getattr(r, "output_text", None)
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+
+        # 2) parsed JSON object path
+        parsed = getattr(r, "output_parsed", None)
+        if parsed is not None:
+            try:
+                return _json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                pass
+
+        # 3) walk output -> content -> text (common in newer SDKs)
+        chunks = []
+        output = getattr(r, "output", None) or []
+        for item in output:
+            for c in getattr(item, "content", []) or []:
+                # looking for "output_text" or generic "text"
+                t = getattr(c, "text", None) or getattr(c, "content", None)
+                if isinstance(t, str) and t.strip():
+                    chunks.append(t.strip())
+        if chunks:
+            return "\n".join(chunks).strip()
+
+        # 4) absolute fallback
+        return ""
+
+    def _extract_chat_text(r) -> str:
+        # 1) standard
+        try:
+            msg = r.choices[0].message
+        except Exception:
+            # try consolidated output if provided
+            t = getattr(r, "output_text", None)
+            return t.strip() if isinstance(t, str) else ""
+
+        content = getattr(msg, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+        # Some SDKs put alternative fields on message
+        frags = []
+        for attr in ("refusal", "reasoning"):  # rarely populated for plain prompts
+            val = getattr(msg, attr, None)
+            if isinstance(val, str) and val.strip():
+                frags.append(val.strip())
+        if frags:
+            return "\n".join(frags)
+
+        # Consolidated helper
+        t = getattr(r, "output_text", None)
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+
+        return ""
+
+    # ---------- Endpoint calls ----------
+
+    def responses_call(m: str):
         kwargs = {
             "model": m,
             "input": prompt,
             "max_output_tokens": max_out,
-            "generation_config": {  # <- move knobs here for GPT-5 Responses
-                "temperature": 0.3,
-                # you can add others here later: top_p, presence_penalty, frequency_penalty
-            },
         }
+        # Avoid temperature on GPT-5 unless you know your cluster supports it
+        if not m.startswith("gpt-5"):
+            kwargs["generation_config"] = {"temperature": 0.3}
         if want_json:
             kwargs["response_format"] = {"type": "json_object"}
+
         r = client.responses.create(**kwargs)
+        text = _extract_responses_text(r)
+        if not text:
+            _dump_raw("responses", r)
+        return text
 
-        # Best path: SDK exposes consolidated text
-        text = getattr(r, "output_text", None)
-        if isinstance(text, str) and text.strip():
-            return text.strip()
+    def chat_call(m: str):
+        chat_kwargs = {
+            "model": m,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if m.startswith("gpt-5"):
+            chat_kwargs["max_completion_tokens"] = max_out
+            # do NOT send temperature; some stacks only allow default (1)
+        else:
+            chat_kwargs["max_tokens"] = max_out
+            chat_kwargs["temperature"] = 0.3
 
-        # Try parsed JSON if available
-        parsed = getattr(r, "output_parsed", None)
-        if parsed is not None:
-            try:
-                return json.dumps(parsed, ensure_ascii=False)
-            except Exception:
-                pass
-
-        # Robust concatenation through the content array
-        chunks: List[str] = []
-        output = getattr(r, "output", None) or []
-        for item in output:
-            for c in getattr(item, "content", []) or []:
-                if getattr(c, "type", "") == "output_text" and getattr(c, "text", None):
-                    chunks.append(c.text)
-        out = "\n".join(chunks).strip()
-        if out:
-            return out
-
-        # Last resort: string form
-        return str(r)
-
-    def chat_call(m: str) -> str:
-        extras = {}
         if want_json:
-            # Newer Chat API supports response_format for JSON
-            extras["response_format"] = {"type": "json_object"}
-        r = client.chat.completions.create(
-            model=m,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=max_out,
-            **extras,
-        )
-        content = (r.choices[0].message.content or "").strip()
-        return content
+            chat_kwargs["response_format"] = {"type": "json_object"}
 
-    def call_once(m: str) -> str:
-        if use_responses(m, engine):
+        r = client.chat.completions.create(**chat_kwargs)
+        text = _extract_chat_text(r)
+        if not text:
+            _dump_raw("chat", r)
+        return text
+
+    def call_once(m: str, prefer_responses: bool) -> str:
+        if prefer_responses:
             if verbose:
                 sys.stderr.write(f"[info] Using Responses API with model '{m}' (json={want_json})\n")
             return responses_call(m)
@@ -314,14 +385,41 @@ def call_llm(
                 sys.stderr.write(f"[info] Using Chat Completions with model '{m}' (json={want_json})\n")
             return chat_call(m)
 
+    # ---------- Primary call ----------
     try:
-        return call_once(model)
+        prefer_responses = use_responses(model, engine)
+        text = call_once(model, prefer_responses)
+        if text.strip():
+            return text
+
+        # If GPT-5 returned empty, auto-retry once via the other endpoint
+        if model.startswith("gpt-5"):
+            if verbose:
+                sys.stderr.write("[warn] Empty text from primary endpoint; retrying via alternate endpoint for gpt-5…\n")
+            text2 = call_once(model, not prefer_responses)
+            if text2.strip():
+                return text2
+
+        # Defer to fallback model
+        raise RuntimeError("Empty response text")
+
     except Exception as e:
-        sys.stderr.write(f"[warn] primary model '{model}' failed ({e}); falling back to '{fallback_model}'\n")
+        sys.stderr.write(f"[warn] primary model '{model}' failed/empty ({e}); falling back to '{fallback_model}'\n")
         try:
-            return call_once(fallback_model)
+            # try same endpoint selection with fallback
+            prefer_responses_fb = use_responses(fallback_model, engine)
+            text_fb = call_once(fallback_model, prefer_responses_fb)
+            if text_fb.strip():
+                return text_fb
+            # try alternate endpoint for fallback if still empty
+            if fallback_model.startswith("gpt-5"):
+                text_fb2 = call_once(fallback_model, not prefer_responses_fb)
+                if text_fb2.strip():
+                    return text_fb2
+            return None
         except Exception as e2:
-            raise RuntimeError(f"Both primary and fallback calls failed: {e} / {e2}")
+            sys.stderr.write(f"[warn] fallback call also failed: {e2}\n")
+            return None
 
 def extract_json_from_response(response: str) -> dict:
     # Prefer direct JSON parsing
@@ -366,6 +464,8 @@ def main() -> None:  # noqa: C901
     p.add_argument("--out-dir", type=Path)
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--entities-file", type=Path, help="Path to entities.jsonl for continuity mode")
+    p.add_argument("--dump-raw", action="store_true",
+               help="Dump raw API responses to out_dir for debugging when output is empty")
     args = p.parse_args()
 
     # Load entity_memory from file if --entities-file is provided in continuity mode
@@ -455,8 +555,22 @@ def main() -> None:  # noqa: C901
                     engine=args.engine,
                     fallback_model=args.fallback_model,
                     verbose=args.verbose,
+                    dump_raw_dir=str(out_dir) if args.dump_raw else None,   # <- add
+                    heading=heading,                                        # <- add (for filenames)
                 )
+
+                 # --- belt-and-braces safeguard ---
+                if response is None:
+                    sys.stderr.write(f"[warn] Empty response for '{heading}'. Skipping write.\n")
+                    continue
+                if not isinstance(response, str):
+                    response = str(response)
+                if not response.strip():
+                    sys.stderr.write(f"[warn] Blank response for '{heading}'.\n")
+                # --- end safeguard ---
+
                 print(f"\n[{heading}]\n{response}\n")
+
             except Exception as exc:
                 sys.stderr.write(f"[warn] OpenAI error on '{heading}': {exc}\n")
                 continue
