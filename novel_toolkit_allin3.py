@@ -752,6 +752,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-heading-level", type=int, default=3)
     p.add_argument("--ignore-headings", help="Regex to ignore headings (e.g. '^(week|part)\\b')")
     p.add_argument("--list-sections", action="store_true", help="List detected sections and exit")
+    # Non-batch slicing
+    p.add_argument("--first", type=int, help="Process only the first N sections (non-batch)")
+    p.add_argument("--last", type=int, help="Process only the last N sections (non-batch)")
+    p.add_argument("--range", nargs=2, type=int, metavar=("START", "END"),
+                   help="Process 1-based inclusive range START..END (non-batch)")
     p.add_argument("--batch-first", type=int, help="Take only the first N sections")
     p.add_argument("--batch-range", nargs=2, metavar=("START", "END"), help="Take inclusive range of sections")
 
