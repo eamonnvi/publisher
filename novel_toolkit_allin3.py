@@ -559,6 +559,17 @@ def process_batch_results_ndjson(ndjson_bytes: bytes) -> List[Tuple[int, str, st
         out.append((idx, heading, text or "", model_seen))
     return out
 
+def _apply_sync_slicer(sections, args):
+    """Return (subset_sections, description) for SYNC (non-batch) runs."""
+    if args.sections_first is not None:
+        n = max(0, int(args.sections_first))
+        return sections[:n], f"first {n}"
+    if args.sections_range and len(args.sections_range) == 2:
+        a, b = args.sections_range
+        a = max(1, int(a)); b = max(a, int(b))
+        return sections[a-1:b], f"{a}..{b}"
+    return sections, "all"
+    
 # ------------------------------- slicer --------------------------------------
 def select_sections_for_batch(sections: List[Tuple[str, str]], args: argparse.Namespace) -> List[Tuple[int, str, str]]:
     """Return [(idx, heading, body)] after applying --batch-first / --batch-range."""
@@ -750,15 +761,19 @@ def parse_args() -> argparse.Namespace:
     # Slicing / filtering
     p.add_argument("--heading-regex")
     p.add_argument("--min-heading-level", type=int, default=3)
-    p.add_argument("--ignore-headings", help="Regex to ignore headings (e.g. '^(week|part)\\b')")
+    p.add_argument("--ignore-headings", help=r"Regex to ignore headings (e.g. '^(week|part)\b')")
     p.add_argument("--list-sections", action="store_true", help="List detected sections and exit")
-    # Non-batch slicing
-    p.add_argument("--first", type=int, help="Process only the first N sections (non-batch)")
-    p.add_argument("--last", type=int, help="Process only the last N sections (non-batch)")
-    p.add_argument("--range", nargs=2, type=int, metavar=("START", "END"),
-                   help="Process 1-based inclusive range START..END (non-batch)")
-    p.add_argument("--batch-first", type=int, help="Take only the first N sections")
-    p.add_argument("--batch-range", nargs=2, metavar=("START", "END"), help="Take inclusive range of sections")
+
+    # Non-batch (sync) slicers
+    p.add_argument("--sections-first", type=int, metavar="N",
+                   help="SYNC ONLY: process only the first N sections")
+    p.add_argument("--sections-range", nargs=2, type=int, metavar=("START", "END"),
+                   help="SYNC ONLY: process only sections START..END (1-based, inclusive)")
+
+    # Batch slicers (apply when building/submitting batches)
+    p.add_argument("--batch-first", type=int, help="BATCH: include only first N sections")
+    p.add_argument("--batch-range", nargs=2, type=int, metavar=("START", "END"),
+                   help="BATCH: include only sections START..END (1-based, inclusive)")
 
     # Output / runtime
     p.add_argument("--out-dir", type=Path)
@@ -777,27 +792,35 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fx-rate", type=float, help="Multiply USD costs by FX to display in GBP")
 
     # Resume entities JSONL
-    p.add_argument("--resume-entities", type=str, help="Append new entities to an existing entities.jsonl")
+    p.add_argument("--resume-entities", type=str,
+                   help="Append new entities to an existing entities.jsonl (skip duplicates)")
 
     # Concise niceties
     p.add_argument("--normalize-output", action="store_true", help="Normalise concise outputs")
     p.add_argument("--continue-on-truncate", action="store_true")
     p.add_argument("--continue-max", type=int, default=1)
 
-    # Estimate-only
-    p.add_argument("--estimate-only", action="store_true", help="Do not call API, just write estimate profile.csv")
-    p.add_argument("--estimate-out", type=int, help="Override estimated tokens_out per section in estimate-only")
+    # Estimate-only (no API)
+    p.add_argument("--estimate-only", action="store_true",
+                   help="Do not call API, just write estimate profile.csv")
+    p.add_argument("--estimate-out", type=int,
+                   help="Override estimated tokens_out per section in estimate-only")
 
-    # Batch API
+    # Simple sync dry-run (optional convenience; does not build batches)
+    p.add_argument("--dry-run", action="store_true",
+                   help="SYNC ONLY: build prompts and exit (no API calls)")
+
+    # Batch API controls
     p.add_argument("--batch-submit", action="store_true", help="Create NDJSON and submit Batch")
-    p.add_argument("--batch-dry-run", action="store_true", help="Write NDJSON only")
+    p.add_argument("--batch-dry-run", action="store_true", help="Write NDJSON only (no submit)")
     p.add_argument("--batch-status", metavar="BATCH_ID", help="Show status")
     p.add_argument("--batch-fetch", metavar="BATCH_ID", help="Fetch completed batch outputs")
     p.add_argument("--batch-wait", type=int, metavar="SECONDS",
-                   help="If set with --batch-fetch, poll until completion or timeout.")
+                   help="With --batch-fetch, poll until completion or timeout")
     p.add_argument("--batch-poll-every", type=int, default=5, metavar="SECONDS",
-                   help="Polling interval (seconds) for --batch-fetch when --batch-wait is set. Default: 5.")    
-    p.add_argument("--profile-on-fetch", action="store_true", help="Rebuild tokens/costs on fetch")
+                   help="Polling interval (seconds) for --batch-wait")
+    p.add_argument("--profile-on-fetch", action="store_true",
+                   help="On fetch: rebuild tokens/costs from outputs (and inputs if draft supplied)")
 
     return p.parse_args()
 
@@ -1158,8 +1181,13 @@ def main() -> None:
     CTX_LIMITS = {"gpt-5": 1_000_000, "gpt-5-mini": 1_000_000, "gpt-4.1": 128_000, "gpt-4.1-mini": 1_000_000}
     CTX_LIMIT = CTX_LIMITS.get(args.model, 128_000)
 
-    # Apply slicer to sync path too
-    run_list = select_sections_for_batch(sections, args)
+    # Apply SYNC-only slicer (independent of batch slicer)
+    sync_sections, sel_desc = _apply_sync_slicer(sections, args)
+    if args.verbose:
+        sys.stderr.write(f"[sync] selection: {sel_desc} of {len(sections)} total\n")
+
+    # Build run list with 1-based indices (like your existing loop expects)
+    run_list = [(i, h, b) for i, (h, b) in enumerate(sync_sections, 1)]
 
     processed = 0
     missing_sections: List[Tuple[int, str]] = []
