@@ -219,6 +219,33 @@ def safe_slug(s: str) -> str:
     s2 = re.sub(r"[^a-zA-Z0-9._-]+", "_", s.strip())
     return s2[:80] if len(s2) > 80 else s2
 
+def _should_run_batch(args: argparse.Namespace, mode: str) -> bool:
+    """
+    Decide if we take the Batch path.
+    Priority:
+      1) explicit fetch/status/submit/dry-run always batch
+      2) --force-batch overrides
+      3) --force-sync disables batch
+      4) otherwise default policy (you can keep copyedit defaulting to batch or not)
+    """
+    # Any explicit batch operation => batch
+    if args.batch_fetch or args.batch_status or args.batch_submit or args.batch_dry_run:
+        return True
+    # Explicit overrides
+    if getattr(args, "force_batch", False):
+        return True
+    if getattr(args, "force_sync", False):
+        return False
+    # 3) default policy
+    default_batch_modes = {"copyedit"}
+    return (mode in default_batch_modes)
+
+    # Default policy (tweak as you like):
+    # - copyedit tends to be long → default batch
+    # - critique/entities/continuity can go either way, but keep as sync by default
+    default_batch_modes = {"copyedit"}
+    return mode in default_batch_modes
+
 def prepend_cli_metadata_to_output(output_path: Path, args: argparse.Namespace, mode: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     output_abs_path = output_path.resolve()
@@ -569,7 +596,7 @@ def _apply_sync_slicer(sections, args):
         a = max(1, int(a)); b = max(a, int(b))
         return sections[a-1:b], f"{a}..{b}"
     return sections, "all"
-    
+
 # ------------------------------- slicer --------------------------------------
 def select_sections_for_batch(sections: List[Tuple[str, str]], args: argparse.Namespace) -> List[Tuple[int, str, str]]:
     """Return [(idx, heading, body)] after applying --batch-first / --batch-range."""
@@ -757,7 +784,11 @@ def parse_args() -> argparse.Namespace:
                    choices=["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"])
     p.add_argument("--engine", choices=["auto", "responses", "chat"], default="auto")
     p.add_argument("--fallback-model", choices=["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"], default=None)
-
+    # Batch or Sync
+    p.add_argument("--force-sync", action="store_true",
+                   help="Force synchronous (live) run even for modes that usually batch.")
+    p.add_argument("--force-batch", action="store_true",
+                   help="Force batch run (build/submit NDJSON) even for modes that usually sync.")
     # Slicing / filtering
     p.add_argument("--heading-regex")
     p.add_argument("--min-heading-level", type=int, default=3)
@@ -1030,13 +1061,30 @@ def main() -> None:
             rx_ign = re.compile(args.ignore_headings, re.IGNORECASE)
             before = len(sections)
             sections = [(h, b) for (h, b) in sections if not rx_ign.search(h)]
-            if args.verbose:
-                sys.stderr.write(f"[info] Ignored {before - len(sections)} sections via --ignore-headings\n")
+
+        # >>> ADD THIS BLOCK (sync slicer applies to *non-batch* flows, incl. --list-sections) >>>
+        def _apply_sync_slicer(secs, ns):
+            if getattr(ns, "sections_first", None) is not None:
+                n = max(0, int(ns.sections_first))
+                return secs[:n], f"first {n}"
+            if getattr(ns, "sections_range", None):
+                a, b = ns.sections_range
+                a = max(1, int(a)); b = max(a, int(b))
+                return secs[a-1:b], f"{a}..{b}"
+            return secs, "all"
+
+        sections, sel_desc = _apply_sync_slicer(sections, args)
+        if args.verbose:
+            sys.stderr.write(f"[sync] selection: {sel_desc} of {len(sections)} total\n")
+        # <<< END ADD
 
     if args.list_sections:
         for idx, (h, b) in enumerate(sections, 1):
             sys.stderr.write(f"[slice] {idx:03d} | {h} | {len((b or '').strip())} chars\n")
         return
+
+        # --- decide execution path (batch vs sync) -------------------
+        run_batch = _should_run_batch(args, args.mode)
 
     # --- estimate-only early exit ---
     if args.estimate_only:
@@ -1188,129 +1236,129 @@ def main() -> None:
 
     # Build run list with 1-based indices (like your existing loop expects)
     run_list = [(i, h, b) for i, (h, b) in enumerate(sync_sections, 1)]
+    if not run_batch:
+        processed = 0
+        missing_sections: List[Tuple[int, str]] = []
 
-    processed = 0
-    missing_sections: List[Tuple[int, str]] = []
-
-    try:
-        for idx, heading, body in tqdm(run_list, desc="Processing", unit="section"):
-            if (not (body or "").strip()) and (not args.whole):
-                if args.verbose:
-                    sys.stderr.write(f"[warn] '{heading}' has no body text; skipped.\n")
-                if args.profile and prof_writer:
-                    prof_writer.writerow([idx, heading,
+        try:
+            for idx, heading, body in tqdm(run_list, desc="Processing", unit="section"):
+                if (not (body or "").strip()) and (not args.whole):
+                    if args.verbose:
+                        sys.stderr.write(f"[warn] '{heading}' has no body text; skipped.\n")
+                    if args.profile and prof_writer:
+                        prof_writer.writerow([idx, heading,
                                           "responses" if (args.engine=="responses" or (args.engine=="auto" and args.model.startswith("gpt-5"))) else "chat",
                                           args.model, 0, 0, 0.0, "", "", "", "skipped"])
-                continue
+                    continue
 
-            prompt = build_prompt(args.mode, heading, body, args.format, prior=None)
-            total_in = num_tokens(args.model, prompt)
-            if args.verbose:
-                sys.stderr.write(f"[debug] {heading}: {total_in} tokens in\n")
+                    prompt = build_prompt(args.mode, heading, body, args.format, prior=None)
+                    total_in = num_tokens(args.model, prompt)
+                    if args.verbose:
+                        sys.stderr.write(f"[debug] {heading}: {total_in} tokens in\n")
 
-            if total_in + args.max_tokens_out + 10 > CTX_LIMIT:
-                sys.stderr.write(f"[warn] '{heading}' exceeds {args.model} context window; skipped.\n")
+                    if total_in + args.max_tokens_out + 10 > CTX_LIMIT:
+                        sys.stderr.write(f"[warn] '{heading}' exceeds {args.model} context window; skipped.\n")
+                        if args.profile and prof_writer:
+                            prof_writer.writerow([idx, heading,
+                                              "responses" if (args.engine=="responses" or (args.engine=="auto" and args.model.startswith("gpt-5"))) else "chat",
+                                              args.model, total_in, 0, 0.0, "", "", "", "skipped_ctx"])
+                        continue
+
+                t0 = time.time()
+                response = call_llm(
+                    client=client,
+                    model=args.model,
+                    prompt=prompt,
+                    max_out=args.max_tokens_out,
+                    want_json=(args.format in {"json","both"} and args.mode in {"entities","continuity"}),
+                    engine=args.engine,
+                    fallback_model=args.fallback_model,
+                    verbose=args.verbose,
+                    dump_raw_dir=str(out_dir) if args.dump_raw else None,
+                    heading=heading,
+                    request_timeout=args.request_timeout,
+                    max_retries=args.max_retries,
+                )
+                dt = time.time() - t0
+
+                if not response or not response.strip():
+                    sys.stderr.write(f"[warn] Empty/no response for '{heading}'. Marking missing.\n")
+                    missing_sections.append((idx, heading))
+                    if args.profile and prof_writer:
+                        ci, co, ct, cur = estimate_cost(args.model, total_in, 0, args.fx_rate) if args.price else ("","","","")
+                        prof_writer.writerow([idx, heading,
+                                              "responses" if (args.engine=="responses" or (args.engine=="auto" and args.model.startswith("gpt-5"))) else "chat",
+                                              args.model, total_in, 0, round(dt,3), ci, co, ct, cur])
+                    continue
+
+                text_out = response
+
+                # Auto-continue if concise looks truncated (simple heuristic)
+                def _looks_truncated(s: str) -> bool:
+                    return bool(len(s.strip()) > 200 and not s.strip().endswith((".", "!", "?", "”", "’")))
+
+                if args.mode == "concise" and args.format in {"md","both"} and args.continue_on_truncate:
+                    tries = 0
+                    while _looks_truncated(text_out) and tries < args.continue_max:
+                        tries += 1
+                        cont_prompt = (
+                            "Continue the previous SUMMARY from exactly where it stopped. "
+                            "Do not repeat earlier text. Finish cleanly.\n\n"
+                            f"PREVIOUS END:\n{text_out[-600:]}"
+                        )
+                        cont = call_llm(
+                            client=client,
+                            model=args.model,
+                            prompt=cont_prompt,
+                            max_out=min(768, args.max_tokens_out),
+                            want_json=False,
+                            engine=args.engine,
+                            fallback_model=args.fallback_model,
+                            verbose=args.verbose,
+                            dump_raw_dir=str(out_dir) if args.dump_raw else None,
+                            heading=heading + " (cont)",
+                            request_timeout=args.request_timeout,
+                            max_retries=args.max_retries,
+                        ) or ""
+                        text_out = (text_out + "\n" + cont.strip()).strip()
+
+                # Normalise concise
+                if args.mode == "concise" and args.normalize_output and args.format in {"md","both"}:
+                    summary, title = normalize_concise(text_out)
+                    normalized = summary.strip()
+                    if title:
+                        normalized = f"{normalized}\n\n*Suggested title:* {title}"
+                    text_out = normalized
+
+                # Write outputs
+                if md_fh and args.format in {"md","both"} and args.mode != "entities":
+                    md_fh.write(f"**{h_disp}**\n\n{(text or '').strip()}\n\n")
+
+                if json_fh and args.format in {"json","both"}:
+                    if args.mode in {"entities", "continuity"}:
+                        # Try clean JSON
+                        try:
+                            obj = json.loads(text_out)
+                        except Exception:
+                            obj = {"section_heading": heading, "raw": text_out}
+                        json_fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                    else:
+                        jf.write(json.dumps({"section_heading": h_disp, "raw": text}, ensure_ascii=False) + "\n")
+
+                # Profiling
                 if args.profile and prof_writer:
-                    prof_writer.writerow([idx, heading,
-                                          "responses" if (args.engine=="responses" or (args.engine=="auto" and args.model.startswith("gpt-5"))) else "chat",
-                                          args.model, total_in, 0, 0.0, "", "", "", "skipped_ctx"])
-                continue
+                    tokens_out_est = num_tokens(args.model, text_out)
+                    ci, co, ct, cur = estimate_cost(args.model, total_in, tokens_out_est, args.fx_rate) if args.price else ("","","","")
+                    endpoint = "responses" if (args.engine=="responses" or (args.engine=="auto" and args.model.startswith("gpt-5"))) else "chat"
+                    prof_writer.writerow([idx, heading, endpoint, args.model, total_in, tokens_out_est, round(dt,3), ci, co, ct, cur])
 
-            t0 = time.time()
-            response = call_llm(
-                client=client,
-                model=args.model,
-                prompt=prompt,
-                max_out=args.max_tokens_out,
-                want_json=(args.format in {"json","both"} and args.mode in {"entities","continuity"}),
-                engine=args.engine,
-                fallback_model=args.fallback_model,
-                verbose=args.verbose,
-                dump_raw_dir=str(out_dir) if args.dump_raw else None,
-                heading=heading,
-                request_timeout=args.request_timeout,
-                max_retries=args.max_retries,
-            )
-            dt = time.time() - t0
+                processed += 1
 
-            if not response or not response.strip():
-                sys.stderr.write(f"[warn] Empty/no response for '{heading}'. Marking missing.\n")
-                missing_sections.append((idx, heading))
-                if args.profile and prof_writer:
-                    ci, co, ct, cur = estimate_cost(args.model, total_in, 0, args.fx_rate) if args.price else ("","","","")
-                    prof_writer.writerow([idx, heading,
-                                          "responses" if (args.engine=="responses" or (args.engine=="auto" and args.model.startswith("gpt-5"))) else "chat",
-                                          args.model, total_in, 0, round(dt,3), ci, co, ct, cur])
-                continue
-
-            text_out = response
-
-            # Auto-continue if concise looks truncated (simple heuristic)
-            def _looks_truncated(s: str) -> bool:
-                return bool(len(s.strip()) > 200 and not s.strip().endswith((".", "!", "?", "”", "’")))
-
-            if args.mode == "concise" and args.format in {"md","both"} and args.continue_on_truncate:
-                tries = 0
-                while _looks_truncated(text_out) and tries < args.continue_max:
-                    tries += 1
-                    cont_prompt = (
-                        "Continue the previous SUMMARY from exactly where it stopped. "
-                        "Do not repeat earlier text. Finish cleanly.\n\n"
-                        f"PREVIOUS END:\n{text_out[-600:]}"
-                    )
-                    cont = call_llm(
-                        client=client,
-                        model=args.model,
-                        prompt=cont_prompt,
-                        max_out=min(768, args.max_tokens_out),
-                        want_json=False,
-                        engine=args.engine,
-                        fallback_model=args.fallback_model,
-                        verbose=args.verbose,
-                        dump_raw_dir=str(out_dir) if args.dump_raw else None,
-                        heading=heading + " (cont)",
-                        request_timeout=args.request_timeout,
-                        max_retries=args.max_retries,
-                    ) or ""
-                    text_out = (text_out + "\n" + cont.strip()).strip()
-
-            # Normalise concise
-            if args.mode == "concise" and args.normalize_output and args.format in {"md","both"}:
-                summary, title = normalize_concise(text_out)
-                normalized = summary.strip()
-                if title:
-                    normalized = f"{normalized}\n\n*Suggested title:* {title}"
-                text_out = normalized
-
-            # Write outputs
-            if md_fh and args.format in {"md","both"} and args.mode != "entities":
-                md_fh.write(f"**{h_disp}**\n\n{(text or '').strip()}\n\n")
-
-            if json_fh and args.format in {"json","both"}:
-                if args.mode in {"entities", "continuity"}:
-                    # Try clean JSON
-                    try:
-                        obj = json.loads(text_out)
-                    except Exception:
-                        obj = {"section_heading": heading, "raw": text_out}
-                    json_fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                else:
-                    jf.write(json.dumps({"section_heading": h_disp, "raw": text}, ensure_ascii=False) + "\n")
-
-            # Profiling
-            if args.profile and prof_writer:
-                tokens_out_est = num_tokens(args.model, text_out)
-                ci, co, ct, cur = estimate_cost(args.model, total_in, tokens_out_est, args.fx_rate) if args.price else ("","","","")
-                endpoint = "responses" if (args.engine=="responses" or (args.engine=="auto" and args.model.startswith("gpt-5"))) else "chat"
-                prof_writer.writerow([idx, heading, endpoint, args.model, total_in, tokens_out_est, round(dt,3), ci, co, ct, cur])
-
-            processed += 1
-
-    finally:
-        if md_fh:
-            md_fh.close()
-        if json_fh:
-            json_fh.close()
+        finally:
+            if md_fh:
+                md_fh.close()
+            if json_fh:
+                json_fh.close()
 
     if processed == 0:
         sys.exit("[error] No sections processed. Check headings, token limits, or model window.")
