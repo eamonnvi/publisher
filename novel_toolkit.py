@@ -148,8 +148,8 @@ def prepend_cli_metadata_to_output(output_path: Path, args: argparse.Namespace, 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
-    def _norm_heading(h: str | None) -> str:
-        """Normalise headings for stable comparisons."""
+def _norm_heading(h: str | None) -> str:
+    """Normalise headings for stable comparisons."""
     if not h:
         return ""
     return re.sub(r"\s+", " ", h).strip()
@@ -876,28 +876,32 @@ def main() -> None:
     # === counters for the run ===
     processed = 0
     # attempted = 0   # (optional) if you later want to report attempts separately
-    
-            # ---- resume-entities preload (only for entities/json paths) ----
-            done_headings: set[str] = set()
-            if args.mode == "entities" and args.resume_entities:
-                try:
-                    with args.resume_entities.open("r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                obj = json.loads(line)
-                                h = obj.get("section_heading") or obj.get("heading")
-                                if h:
-                                    done_headings.add(_norm_heading(h))
-                            except Exception:
-                                # skip malformed lines
-                                pass
-                    if args.verbose:
-                        sys.stderr.write(f"[resume] Preloaded {len(done_headings)} existing entity records from {args.resume_entities}\n")
-                except FileNotFoundError:
-                    sys.stderr.write(f"[warn] --resume-entities file not found: {args.resume_entities}\n")
+
+    # ---- resume-entities preload (only for entities/json paths) ----
+    done_headings: set[str] = set()
+    if args.mode == "entities" and args.resume_entities:
+        try:
+            with args.resume_entities.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        h = obj.get("section_heading") or obj.get("heading")
+                        if h:
+                            done_headings.add(_norm_heading(h))
+                    except Exception:
+                        # skip malformed lines
+                        pass
+            if args.verbose:
+                sys.stderr.write(
+                    f"[resume] Preloaded {len(done_headings)} existing entity records from {args.resume_entities}\n"
+                )
+        except FileNotFoundError:
+            sys.stderr.write(
+                f"[warn] --resume-entities file not found: {args.resume_entities}\n"
+            )
 
     # --- estimate-only early exit ------------------------------------------------
     if args.estimate_only:
