@@ -16,9 +16,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mode", required=True, choices=modes, help="Processing mode (from ntk_prompts.PROMPTS)")
     p.add_argument("--sections-first", type=int, metavar="N",
                    help="SYNC ONLY: process only the first N sections")
-    p.add_argument("--model", default="gpt-5",
+    p.add_argument("--model", default="gpt-4.1",
                    choices=["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"])
-    p.add_argument("--max-tokens-out", type=int, default=800)
+    p.add_argument("--max-output-tokens", type=int, default=2000)
     p.add_argument("--timeout", type=int, default=60)
     p.add_argument("--retries", type=int, default=2)
     p.add_argument("--heading-regex", default=r"(?m)^\s*#{3,6}\s+(.+?)\s*$",
@@ -49,7 +49,7 @@ def main():
         mode=args.mode,
         model=args.model,
         timeout=args.timeout,
-        max_out=args.max_tokens_out,  # ntk_core.run_sync expects max_out
+        max_out=args.max_output_tokens,  # ntk_core.run_sync expects max_out
         retries=args.retries,
         verbose=args.verbose,
     )

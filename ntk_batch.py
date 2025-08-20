@@ -41,25 +41,36 @@ def run_batch(sections: List[Tuple[str,str]],
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": max_output_tokens,
             }
-
-    # write NDJSON
+    # write NDJSON and batch_map.json
     count = 0
+    cid_to_heading = {}
+
     with ndjson_path.open("w", encoding="utf-8") as fh:
         for idx, (heading, body) in enumerate(sections, 1):
             if not (body or "").strip():
                 continue
             prompt = render_prompt_text(mode, heading, body)
+            cid = f"sec_{idx:04d}"
             obj = {
-                "custom_id": f"sec_{idx:04d}",
+                "custom_id": cid,
                 "method": "POST",
                 "url": endpoint,
                 "body": make_body(prompt),
             }
             fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            cid_to_heading[cid] = heading
             count += 1
+
+    # save the cid→heading map
+    map_path = out_dir / "batch_map.json"
+    map_path.write_text(
+        json.dumps(cid_to_heading, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
     if verbose:
         print(f"[batch] wrote {count} lines -> {ndjson_path}", file=sys.stderr)
+        print(f"[batch] wrote batch_map.json ({len(cid_to_heading)} entries) -> {map_path}", file=sys.stderr)
 
     # submit
     file_obj = client.files.create(file=ndjson_path.open("rb"), purpose="batch")
