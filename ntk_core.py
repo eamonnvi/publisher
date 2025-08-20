@@ -6,8 +6,33 @@ import time            # used for retry sleeps/backoff in call_openai
 from typing import List, Tuple
 
 from openai import OpenAI
-from ntk_prompts import build_prompt
+from ntk_prompts import PROMPTS
 
+def render_prompt_text(mode: str, heading: str, body: str) -> str:
+    """
+    Render PROMPTS[mode] into a single text block suitable for /v1/responses
+    (and fine to send as a single chat message if you fall back).
+    """
+    spec = PROMPTS.get(mode)
+    if spec is None:
+        raise KeyError(f"Unknown mode: {mode!r}")
+
+    # Back-compat: allow string templates if any remain
+    if isinstance(spec, str):
+        return spec.format(body=body, heading=heading)
+
+    if not isinstance(spec, dict):
+        raise TypeError(f"PROMPTS[{mode!r}] must be str or dict with system/user")
+
+    sys_txt = (spec.get("system") or "").format(body=body, heading=heading).strip()
+    usr_txt = (spec.get("user")   or "").format(body=body, heading=heading).strip()
+
+    parts = []
+    if sys_txt:
+        parts.append(f"[SYSTEM]\n{sys_txt}")
+    if usr_txt:
+        parts.append(usr_txt)
+    return "\n\n".join(parts)
 
 # --- basic md splitter (ATX headings ### and above by default via CLI) ---
 
@@ -177,7 +202,7 @@ def run_sync(
             continue
 
         heading = normalize_heading(heading)
-        prompt = build_prompt(mode, heading, body)
+        prompt = render_prompt_text(mode, heading, body)
 
         if verbose:
             print(f"[sync] section {i} • {heading!r} • prompt_len={len(prompt)}", file=sys.stderr)

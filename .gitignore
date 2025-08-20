@@ -1,24 +1,28 @@
-concise/*
-copyedit/*
-detailed/*
-critique/*
-discursive/*
-improvement/*
-plot-points/*
-sensitivity/*
-continuity/*
-entities/*
-extract/*
-improvement/*
-overview/*
+concise*/*
+copyedit*/*
+detailed*/*
+critique*/*
+discursive*/*
+improvement*/*
+plot-points*/*
+sensitivity*/*
+continuity*/*
+entities*/*
+extract*/*
+improvement*/*
+overview*/*
 palace_env
 Drafts/*
 Script Development/*
-summaries/*
+summaries*/*
 run.log
+Migration/*
+Output/*
 # Ignore compiled Python files
 __pycache__/
 *.pyc
 # Ignore all .log files
 *.log
+TPV*
+.DS_Store
 

@@ -3,7 +3,7 @@ import json, os, sys
 from pathlib import Path
 from typing import List, Tuple
 from openai import OpenAI
-from ntk_prompts import build_prompt
+from ntk_core import render_prompt_text
 
 def _is_gpt5(model: str) -> bool:
     return str(model or "").lower().startswith("gpt-5")
@@ -48,7 +48,7 @@ def run_batch(sections: List[Tuple[str,str]],
         for idx, (heading, body) in enumerate(sections, 1):
             if not (body or "").strip():
                 continue
-            prompt = build_prompt(mode, heading, body)
+            prompt = render_prompt_text(mode, heading, body)
             obj = {
                 "custom_id": f"sec_{idx:04d}",
                 "method": "POST",
