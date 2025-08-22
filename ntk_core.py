@@ -1,41 +1,11 @@
 # ntk_core.py
-
-import re
-import sys
-import time            # used for retry sleeps/backoff in call_openai
-from typing import List, Tuple
-
+import os, re, sys, time, json
+from typing import List, Tuple, Optional
+from pathlib import Path
 from openai import OpenAI
-from ntk_prompts import PROMPTS
+from ntk_prompts import build_prompt
 
-def render_prompt_text(mode: str, heading: str, body: str) -> str:
-    """
-    Render PROMPTS[mode] into a single text block suitable for /v1/responses
-    (and fine to send as a single chat message if you fall back).
-    """
-    spec = PROMPTS.get(mode)
-    if spec is None:
-        raise KeyError(f"Unknown mode: {mode!r}")
-
-    # Back-compat: allow string templates if any remain
-    if isinstance(spec, str):
-        return spec.format(body=body, heading=heading)
-
-    if not isinstance(spec, dict):
-        raise TypeError(f"PROMPTS[{mode!r}] must be str or dict with system/user")
-
-    sys_txt = (spec.get("system") or "").format(body=body, heading=heading).strip()
-    usr_txt = (spec.get("user")   or "").format(body=body, heading=heading).strip()
-
-    parts = []
-    if sys_txt:
-        parts.append(f"[SYSTEM]\n{sys_txt}")
-    if usr_txt:
-        parts.append(usr_txt)
-    return "\n\n".join(parts)
-
-# --- basic md splitter (ATX headings ### and above by default via CLI) ---
-
+# --- markdown splitter -------------------------------------------------------
 def iter_sections(text: str, heading_rx: str = r"(?m)^\s*#{1,6}\s+(.+?)\s*$") -> List[Tuple[str, str]]:
     """
     Return [(heading_text, body_text)] for ATX-style markdown headings.
@@ -65,149 +35,226 @@ def normalize_heading(h: str) -> str:
     # trims trailing hashes like "Title ###"
     return re.sub(r"\s#+\s*$", "", (h or "").strip())
 
-
-def call_openai(
+# --- stub client (testing only) ----------------------------------------------
+def fake_call_openai(
+    *,
     model: str,
     prompt: str,
     max_out: int = 1024,
     timeout: int = 60,
     retries: int = 2,
     verbose: bool = False,
+    **kwargs,
+) -> str:
+    """Deterministic fake response for tests."""
+    return f"[stub:{model};len={len(prompt)}]"
+
+# --- real client --------------------------------------------------------------
+def real_call_openai(
+    *,
+    model: str,
+    prompt: str,
+    max_out: int = 1024,
+    timeout: int = 60,
+    retries: int = 2,  # (SDK-level retries handled externally)
+    verbose: bool = False,
+    fallback_model: Optional[str] = "gpt-4.1-mini",
+    prefer_non_reasoning: bool = False,
 ) -> str:
     """
-    Prefer /v1/responses for gpt-5*, with robust output extraction.
-    Retry order: responses → responses → chat (or chat → responses for non-gpt-5).
-    Translates token limit to the correct parameter per endpoint.
+    Prefer /v1/responses for gpt-5*, otherwise chat first.
+    If prefer_non_reasoning=True, try fallback_model chat first.
+    Never send unsupported params (e.g., temperature to gpt-5).
     """
-    from openai import OpenAI
     client = OpenAI()
+    is_gpt5 = (model or "").lower().startswith("gpt-5")
 
-    # --- helpers -------------------------------------------------------------
+    SYS_TXT = (
+        "Write the answer as plain visible text for the user. "
+        "Do not omit the answer. Do not hide content in private thinking. "
+        "If you need to reason, keep it brief and output the final answer as text."
+    )
 
-    def _extract_from_responses(r) -> str:
-        """
-        Try several shapes the Responses API may return.
-        """
-        # 1) SDK convenience
+    def _extract_responses_text(r) -> str:
+        # SDK convenience
         try:
-            txt = getattr(r, "output_text", None)
-            if isinstance(txt, str) and txt.strip():
-                return txt.strip()
+            t = getattr(r, "output_text", None)
+            if isinstance(t, str) and t.strip():
+                return t.strip()
         except Exception:
             pass
-
-        # 2) Structured blocks
-        try:
-            out = getattr(r, "output", None)
-            if isinstance(out, list) and out:
-                blk = out[0]
-                if isinstance(blk, dict):
-                    content = blk.get("content")
-                    if isinstance(content, list):
-                        for c in content:
-                            if isinstance(c, dict) and isinstance(c.get("text"), str):
-                                t = c["text"].strip()
-                                if t:
-                                    return t
-        except Exception:
-            pass
-
-        # 3) Dict fallback
+        # raw dict
         try:
             d = r if isinstance(r, dict) else r.model_dump()
-            for k in ("output_text", "text"):
-                t = d.get(k)
-                if isinstance(t, str) and t.strip():
-                    return t.strip()
+            t = d.get("text") or d.get("output_text")
+            if isinstance(t, str) and t.strip():
+                return t.strip()
         except Exception:
             pass
-
+        # blocks
+        try:
+            out = getattr(r, "output", None)
+            if not out and not isinstance(r, dict):
+                try:
+                    out = r.model_dump().get("output")
+                except Exception:
+                    out = None
+            if isinstance(out, list):
+                for block in out:
+                    if isinstance(block, dict):
+                        # message content list
+                        if block.get("type") == "message":
+                            content = block.get("content", [])
+                            if isinstance(content, list):
+                                for c in content:
+                                    if isinstance(c, dict) and isinstance(c.get("text"), str):
+                                        txt = c["text"].strip()
+                                        if txt:
+                                            return txt
+                        # simple fallbacks
+                        if isinstance(block.get("text"), str):
+                            txt = block["text"].strip()
+                            if txt: return txt
+                        if isinstance(block.get("content"), str):
+                            txt = block["content"].strip()
+                            if txt: return txt
+        except Exception:
+            pass
         return ""
 
-    # Prefer /v1/responses for gpt-5 family
-    prefer_responses = str(model or "").lower().startswith("gpt-5")
+    def _log_empty(label: str, resp_obj):
+        if not verbose:
+            return
+        try:
+            if hasattr(resp_obj, "model_dump_json"):
+                raw = resp_obj.model_dump_json()
+            elif hasattr(resp_obj, "model_dump"):
+                raw = json.dumps(resp_obj.model_dump(), ensure_ascii=False)
+            else:
+                raw = json.dumps(resp_obj if isinstance(resp_obj, dict) else {}, ensure_ascii=False)
+            sys.stderr.write(f"[debug] {label} returned empty text; raw payload follows:\n{raw}\n")
+        except Exception as e:
+            sys.stderr.write(f"[debug] {label} empty; could not dump payload: {e}\n")
 
-    def call_responses_once() -> str:
+    def call_responses(curr_model: str) -> str:
         if verbose:
             sys.stderr.write("[info] using /v1/responses\n")
         try:
-            resp = client.responses.create(
-                model=model,
+            kwargs = dict(
+                model=curr_model,
                 input=prompt,
                 max_output_tokens=max_out,
+                instructions=SYS_TXT,
+                timeout=timeout,
             )
-            txt = _extract_from_responses(resp)
+            # DO NOT set temperature for gpt-5 models (unsupported).
+            if not curr_model.lower().startswith("gpt-5"):
+                kwargs["temperature"] = 0
+
+            r = client.responses.create(**kwargs)
+            txt = _extract_responses_text(r)
+            if not txt:
+                _log_empty("responses/plain", r)
             return txt
         except Exception as e:
             if verbose:
-                sys.stderr.write(f"[warn] responses call error: {e}\n")
+                sys.stderr.write(f"[warn] responses error: {e}\n")
             return ""
 
-    def call_chat_once() -> str:
+    def call_chat(curr_model: str) -> str:
         if verbose:
             sys.stderr.write("[info] using /v1/chat/completions\n")
         try:
-            # gpt-5 chat expects max_completion_tokens; others use max_tokens
-            tok_field = "max_completion_tokens" if str(model).lower().startswith("gpt-5") else "max_tokens"
+            tok_field = "max_completion_tokens" if curr_model.lower().startswith("gpt-5") else "max_tokens"
             kwargs = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "model": curr_model,
+                "messages": [
+                    {"role": "system", "content": SYS_TXT},
+                    {"role": "user", "content": prompt},
+                ],
                 tok_field: max_out,
+                "timeout": timeout,
             }
-            resp = client.chat.completions.create(**kwargs)
-            msg = resp.choices[0].message if (resp and resp.choices) else None
-            return (getattr(msg, "content", None) or "").strip() if msg else ""
+            # temperature=0 okay for non-gpt-5; not supported for gpt-5
+            if not curr_model.lower().startswith("gpt-5"):
+                kwargs["temperature"] = 0
+
+            r = client.chat.completions.create(**kwargs)
+            msg = r.choices[0].message if r and r.choices else None
+            txt = (getattr(msg, "content", None) or "").strip() if msg else ""
+            if not txt and verbose:
+                try:
+                    raw = r.model_dump_json()
+                except Exception:
+                    raw = ""
+                sys.stderr.write(f"[debug] chat returned empty text; raw:\n{raw}\n")
+            return txt
         except Exception as e:
             if verbose:
-                sys.stderr.write(f"[warn] chat call error: {e}\n")
+                sys.stderr.write(f"[warn] chat error: {e}\n")
             return ""
 
-    # Attempt order & simple retry loop
-    attempts = (
-        [call_responses_once, call_responses_once, call_chat_once]
-        if prefer_responses
-        else [call_chat_once, call_responses_once]
-    )
+    def _attempt(curr_model: str, prefer_resp: bool) -> str:
+        order = [call_responses, call_chat] if prefer_resp else [call_chat, call_responses]
+        for i, fn in enumerate(order, 1):
+            txt = fn(curr_model)
+            if txt:
+                return txt
+            if verbose:
+                sys.stderr.write(f"[warn] attempt {i}/{len(order)} with {curr_model}: empty text; retrying…\n")
+            time.sleep(0.3)
+        return ""
 
-    tries = 0
-    for fn in attempts:
-        tries += 1
-        txt = fn()
-        if txt:
-            return txt
+    # Routing logic
+    if prefer_non_reasoning and fallback_model:
+        # Try a non-reasoning chat model first
         if verbose:
-            sys.stderr.write(f"[warn] attempt {tries}/{len(attempts)}: empty text; retrying…\n")
-        time.sleep(0.4)
+            sys.stderr.write(f"[info] prefer_non_reasoning=True → trying {fallback_model} chat first\n")
+        out = _attempt(fallback_model, prefer_resp=False)
+        if out:
+            return out
+        # then try the requested model
+        out = _attempt(model, prefer_resp=is_gpt5)
+        if out:
+            return out
+    else:
+        # default path: gpt-5 → responses first; others → chat first
+        out = _attempt(model, prefer_resp=is_gpt5)
+        if out:
+            return out
+        if fallback_model and fallback_model.lower() != (model or "").lower():
+            if verbose:
+                sys.stderr.write(f"[info] falling back to {fallback_model}\n")
+            out = _attempt(fallback_model, prefer_resp=False)
+            if out:
+                return out
 
     raise RuntimeError("Empty text from endpoint")
 
-
-def run_sync(
-    sections: List[Tuple[str, str]],
-    mode: str,
-    model: str = "gpt-5",
-    timeout: int = 60,
+# --- unified wrapper ----------------------------------------------------------
+def call_openai(
+    *,
+    model: str,
+    prompt: str,
     max_out: int = 1024,
-    retries: int = 2,   # reserved for future per-call retry; we do multi-endpoint tries already
+    timeout: int = 60,
+    retries: int = 2,
     verbose: bool = False,
-) -> None:
+    use_stub: Optional[bool] = None,          # None => check NTK_STUB env
+    fallback_model: Optional[str] = "gpt-4.1-mini",
+    prefer_non_reasoning: bool = False,
+) -> str:
     """
-    Build prompts and call the real OpenAI API, printing results to stdout.
-    CLI handles file reading & section slicing; this just runs the loop.
+    Single entry point for all callers.
+    - If use_stub is True: uses fake_call_openai
+    - If use_stub is False: uses real_call_openai
+    - If use_stub is None: uses env var NTK_STUB ("1" => stub)
     """
-    for i, (heading, body) in enumerate(sections, 1):
-        if not (body or "").strip():
-            if verbose:
-                print(f"[warn] empty body — skipping: {heading!r}", file=sys.stderr)
-            continue
+    if use_stub is None:
+        use_stub = (os.getenv("NTK_STUB", "").strip() == "1")
 
-        heading = normalize_heading(heading)
-        prompt = render_prompt_text(mode, heading, body)
-
-        if verbose:
-            print(f"[sync] section {i} • {heading!r} • prompt_len={len(prompt)}", file=sys.stderr)
-
-        text = call_openai(
+    if use_stub:
+        return fake_call_openai(
             model=model,
             prompt=prompt,
             max_out=max_out,
@@ -215,5 +262,101 @@ def run_sync(
             retries=retries,
             verbose=verbose,
         )
+    return real_call_openai(
+        model=model,
+        prompt=prompt,
+        max_out=max_out,
+        timeout=timeout,
+        retries=retries,
+        verbose=verbose,
+        fallback_model=fallback_model,
+        prefer_non_reasoning=prefer_non_reasoning,
+    )
 
+# --- sync runners -------------------------------------------------------------
+def run_sync(
+    sections: List[Tuple[str, str]],
+    mode: str,
+    model: str = "gpt-5",
+    timeout: int = 60,
+    max_out: int = 1024,
+    retries: int = 2,
+    verbose: bool = False,
+    use_stub: Optional[bool] = None,  # pass-through switch (or leave None to use env)
+) -> None:
+    for i, (heading, body) in enumerate(sections, 1):
+        if not (body or "").strip():
+            if verbose:
+                print(f"[warn] empty body — skipping: {heading!r}", file=sys.stderr)
+            continue
+
+        heading = normalize_heading(heading)
+        prompt = build_prompt(mode, heading, body)
+
+        if verbose:
+            print(f"[sync] section {i} • {heading!r} • prompt_len={len(prompt)}", file=sys.stderr)
+
+        prefer_nr = mode.startswith("copyedit")  # copyedit modes prefer non-reasoning path
+        text = call_openai(
+            model=model,
+            prompt=prompt,
+            timeout=timeout,
+            max_out=max_out,
+            retries=retries,
+            verbose=verbose,
+            use_stub=use_stub,
+            fallback_model="gpt-4.1-mini",
+            prefer_non_reasoning=prefer_nr,
+        )
         print(f"\n**{heading}**\n\n{text.strip()}\n")
+
+def run_sync_collect(
+    sections: List[Tuple[str, str]],
+    mode: str,
+    model: str = "gpt-5",
+    timeout: int = 60,
+    max_out: int = 1024,
+    retries: int = 2,
+    verbose: bool = False,
+    use_stub: Optional[bool] = None,  # pass-through switch (or leave None to use env)
+):
+    out = []
+    for i, (heading, body) in enumerate(sections, 1):
+        if not (body or "").strip():
+            if verbose:
+                print(f"[warn] empty body — skipping: {heading!r}", file=sys.stderr)
+            continue
+
+        heading = normalize_heading(heading)
+        prompt = build_prompt(mode, heading, body)
+        if verbose:
+            print(f"[sync] section {i} • {heading!r} • prompt_len={len(prompt)}", file=sys.stderr)
+
+        prefer_nr = mode.startswith("copyedit")
+        text = call_openai(
+            model=model,
+            prompt=prompt,
+            timeout=timeout,
+            max_out=max_out,
+            retries=retries,
+            verbose=verbose,
+            use_stub=use_stub,
+            fallback_model="gpt-4.1-mini",
+            prefer_non_reasoning=prefer_nr,
+        )
+        out.append((heading, text))
+    return out
+
+# --- simple writers -----------------------------------------------------------
+def write_markdown(sections_text: List[Tuple[str, str]], path: Path, title: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write(f"# {title}\n\n")
+        for heading, text in sections_text:
+            fh.write(f"**{heading}**\n\n{text.strip()}\n\n")
+
+def write_jsonl(sections_text: List[Tuple[str, str]], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for heading, text in sections_text:
+            fh.write(json.dumps({"heading": heading, "text": text}, ensure_ascii=False) + "\n")
