@@ -282,8 +282,11 @@ def run_sync(
     max_out: int = 1024,
     retries: int = 2,
     verbose: bool = False,
+    force_model_first: bool = False,
+    fallback_model: str | None = "gpt-4.1-mini",
     use_stub: Optional[bool] = None,  # pass-through switch (or leave None to use env)
 ) -> None:
+
     for i, (heading, body) in enumerate(sections, 1):
         if not (body or "").strip():
             if verbose:
@@ -295,8 +298,9 @@ def run_sync(
 
         if verbose:
             print(f"[sync] section {i} • {heading!r} • prompt_len={len(prompt)}", file=sys.stderr)
-
-        prefer_nr = mode.startswith("copyedit")  # copyedit modes prefer non-reasoning path
+        prefer_nr = False
+        if mode.startswith("copyedit") and not force_model_first:
+            prefer_nr = True
         text = call_openai(
             model=model,
             prompt=prompt,
@@ -305,8 +309,8 @@ def run_sync(
             retries=retries,
             verbose=verbose,
             use_stub=use_stub,
-            fallback_model="gpt-4.1-mini",
-            prefer_non_reasoning=prefer_nr,
+            fallback_model=fallback_model,  # may be None
+            prefer_non_reasoning=prefer_nr, # key routing switch
         )
         print(f"\n**{heading}**\n\n{text.strip()}\n")
 
@@ -318,6 +322,8 @@ def run_sync_collect(
     max_out: int = 1024,
     retries: int = 2,
     verbose: bool = False,
+    force_model_first: bool = False,
+    fallback_model: str | None = "gpt-4.1-mini",
     use_stub: Optional[bool] = None,  # pass-through switch (or leave None to use env)
 ):
     out = []
@@ -341,8 +347,8 @@ def run_sync_collect(
             retries=retries,
             verbose=verbose,
             use_stub=use_stub,
-            fallback_model="gpt-4.1-mini",
-            prefer_non_reasoning=prefer_nr,
+            fallback_model=fallback_model,  # may be None
+            prefer_non_reasoning=prefer_nr, # key routing switch
         )
         out.append((heading, text))
     return out

@@ -24,10 +24,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mode", required=True, choices=modes,
                    help="Processing mode (from ntk_prompts.PROMPTS)")
     p.add_argument("--model", default="gpt-4.1",
-                   choices=["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"])
+                   choices=["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4.1-mini"])
     p.add_argument("--max-output-tokens", type=int, default=2000)
     p.add_argument("--timeout", type=int, default=60)
     p.add_argument("--retries", type=int, default=2)
+    p.add_argument("--force-model-first", action="store_true",
+               help="Do NOT prefer the fast non-reasoning fallback first in copyedit modes")
+    p.add_argument("--fallback-model", default="gpt-4.1-mini",
+               choices=["gpt-5","gpt-5-mini", "gpt-5-nano","gpt-4.1","gpt-4.1-mini"],
+               help="Model to try first when prefer_non_reasoning=True")
+    p.add_argument("--no-fallback", action="store_true",
+               help="Disable using a fallback model entirely")
 
     # Slicing / splitting
     p.add_argument("--heading-regex", default=r"(?m)^\s*#{3,6}\s+(.+?)\s*$",
@@ -80,6 +87,8 @@ def main():
         max_out=args.max_output_tokens,
         retries=args.retries,
         verbose=args.verbose,
+        force_model_first=args.force_model_first,
+        fallback_model=None if args.no_fallback else args.fallback_model,
     )
 
     # Naming
