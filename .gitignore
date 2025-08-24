@@ -13,12 +13,10 @@ improvement*/*
 overview*/*
 palace_env
 Drafts/*
-Copy-Edit/*
-Script Development/*
 summaries*/*
 run.log
-Migration/*
 Output/*
+outputs/*
 # Ignore compiled Python files
 __pycache__/
 *.pyc
