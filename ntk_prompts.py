@@ -164,15 +164,38 @@ PROMPTS: Dict[str, Any] = {
 }
 
 def render_prompt_text(mode: str, heading: str, body: str, **extras) -> str:
+    """
+    Render PROMPTS[mode] into a single text block.
+
+    Uses targeted placeholder substitution (not str.format) so that prompts
+    with literal JSON braces don't break. Only {heading}, {body}, and any
+    explicitly provided extras are replaced.
+    """
     spec = PROMPTS.get(mode)
     if spec is None:
         raise KeyError(f"Unknown mode: {mode!r}")
+
+    # Allow legacy string prompts
     if isinstance(spec, str):
-        return spec.format(heading=heading, body=body, **extras)
+        # targeted replace
+        s = spec.replace("{heading}", heading).replace("{body}", body)
+        for k, v in (extras or {}).items():
+            s = s.replace("{" + k + "}", str(v))
+        return s
+
     if not isinstance(spec, dict):
-        raise TypeError(f"PROMPTS[{mode!r}] must be str or dict")
-    sys_txt = (spec.get("system") or "").format(heading=heading, body=body, **extras).strip()
-    usr_txt = (spec.get("user") or "").format(heading=heading, body=body, **extras).strip()
+        raise TypeError(f"PROMPTS[{mode!r}] must be str or dict with system/user")
+
+    def _subst(s: str) -> str:
+        s = (s or "")
+        s = s.replace("{heading}", heading).replace("{body}", body)
+        for k, v in (extras or {}).items():
+            s = s.replace("{" + k + "}", str(v))
+        return s.strip()
+
+    sys_txt = _subst(spec.get("system"))
+    usr_txt = _subst(spec.get("user"))
+
     parts = []
     if sys_txt:
         parts.append(f"[SYSTEM]\n{sys_txt}")
@@ -180,5 +203,5 @@ def render_prompt_text(mode: str, heading: str, body: str, **extras) -> str:
         parts.append(usr_txt)
     return "\n\n".join(parts)
 
-# Back-compat alias
+# Keep compatibility alias
 build_prompt = render_prompt_text

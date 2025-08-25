@@ -232,19 +232,106 @@ def main():
             print(f"[ok] fetched batch into {run_dir}", file=sys.stderr)
         return
 
-    # Batch submit path
-    if args.batch:
+    # --- BATCH PATH ---
+    if args.batch or args.fetch_id:
+        # Build run directory (same scheme as sync)
+        stem = args.basename or f"{Path(args.draft).stem}.{args.mode}.{args.model}"
+        base_out = Path(args.outdir)
+        if args.flat:
+            run_dir = base_out
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tag = f".{args.run_tag}" if args.run_tag else ""
+            run_dir = base_out / f"{stem}{tag}.{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
         client = OpenAI()
-        ndjson_path, batch_map, endpoint, batch_id = run_batch(
-            sections=sections,
-            mode=args.mode,
-            model=args.model,
-            out_dir=run_dir,
-            max_output_tokens=args.max_output_tokens,
-            verbose=args.verbose,
-        )
-        # Record submission metadata
-        submitted = {
+
+        if args.fetch_id:
+            batch_id = args.fetch_id
+            if args.verbose:
+                print(f"[batch] fetching existing batch: {batch_id}", file=sys.stderr)
+        else:
+            # Submit ONCE
+            ret = run_batch(
+                sections=sections,
+                mode=args.mode,
+                model=args.model,
+                out_dir=run_dir,
+                max_output_tokens=args.max_output_tokens,
+                verbose=args.verbose,
+            )
+            # Accept 4-tuple or plain string
+            if isinstance(ret, tuple):
+                # (ndjson_path, batch_map, endpoint, batch_id)
+                if len(ret) != 4:
+                    raise RuntimeError(f"Unexpected run_batch() return arity: {len(ret)}")
+                ndjson_path, batch_map, endpoint, batch_id = ret
+            elif isinstance(ret, str):
+                batch_id = ret
+            else:
+                raise RuntimeError(f"Unexpected run_batch() return type: {type(ret).__name__}")
+            # (ntk_batch.run_batch already printed “[ok] submitted batch: …”)
+
+        # Optional polling
+        if args.poll:
+            if not args.wait:
+                args.wait = 300
+            info = poll_batch(client, batch_id, timeout_s=args.wait, every_s=max(1, args.every), verbose=args.verbose)
+        else:
+            info = get_batch_status(client, batch_id)
+
+        status = info.get("status")
+        if status != "completed":
+            print(f"[warn] batch status = {status}. Fetch later with --fetch-id {batch_id}.", file=sys.stderr)
+            # Also write a tiny meta file so you have the ID recorded
+            (run_dir / "submitted.json").write_text(
+                json.dumps({
+                    "draft": str(args.draft),
+                    "mode": args.mode,
+                    "model": args.model,
+                    "max_output_tokens": args.max_output_tokens,
+                    "whole": bool(args.whole),
+                    "num_sections": len(sections),
+                    "batch_id": batch_id,
+                    "status": status,
+                }, indent=2),
+                encoding="utf-8"
+            )
+            sys.exit(0)
+
+        # Completed → download + render
+        out_id = info.get("output_file_id")
+        if not out_id:
+            print("[error] completed but no output_file_id", file=sys.stderr)
+            sys.exit(1)
+
+        raw = _download_file_bytes(client, out_id)
+        (run_dir / "batch_output.raw.ndjson").write_bytes(raw)
+
+        # Read the id→heading map if present
+        batch_map_path = run_dir / "batch_map.json"
+        batch_map = {}
+        if batch_map_path.exists():
+            try:
+                batch_map = json.loads(batch_map_path.read_text(encoding="utf-8"))
+            except Exception:
+                batch_map = {}
+
+        triples = parse_batch_output_ndjson(raw, batch_map)
+
+        # Save outputs
+        title = ("Copyedit Report" if args.mode.startswith("copyedit")
+                 else "Concise Report" if args.mode.startswith("concise")
+                 else args.mode.replace("_", " ").title())
+        md_path = run_dir / f"{stem}.md"
+        jsonl_path = run_dir / f"{stem}.jsonl"
+        meta_path = run_dir / f"{stem}.meta.json"
+
+        write_markdown([(h, t) for (h, t, _) in triples], md_path, title)
+        write_jsonl([(h, t) for (h, t, _) in triples], jsonl_path)
+
+        meta = {
             "draft": str(args.draft),
             "mode": args.mode,
             "model": args.model,
@@ -252,48 +339,20 @@ def main():
             "whole": bool(args.whole),
             "num_sections": len(sections),
             "batch_id": batch_id,
-            "endpoint": endpoint,
-            "ndjson": str(ndjson_path.name),
-            "map": "batch_map.json",
+            "outdir": str(run_dir.resolve()),
+            "outputs": {
+                "markdown": md_path.name,
+                "jsonl": jsonl_path.name,
+            },
         }
-        (run_dir / "submitted.json").write_text(json.dumps(submitted, indent=2), encoding="utf-8")
-        print(f"[ok] submitted batch: {batch_id}", file=sys.stderr)
-        return
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    # Sync path
-    triples = run_sync_collect(
-        sections=sections,
-        mode=args.mode,
-        model=args.model,
-        timeout=args.timeout,
-        max_out=args.max_output_tokens,
-        retries=args.retries,
-        verbose=args.verbose,
-    )
-
-    title = ("Copyedit Report" if args.mode.startswith("copyedit")
-             else "Concise Report" if args.mode.startswith("concise")
-             else args.mode.replace("_", " ").title())
-    write_markdown(triples, md_path, title)
-    write_jsonl(triples, jsonl_path)
-
-    meta = {
-        "draft": str(args.draft),
-        "mode": args.mode,
-        "model": args.model,
-        "max_output_tokens": args.max_output_tokens,
-        "whole": bool(args.whole),
-        "num_sections": len(sections),
-        "outdir": str(run_dir.resolve()),
-        "outputs": {"markdown": md_path.name, "jsonl": jsonl_path.name},
-    }
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    if args.verbose:
-        print("[ok] wrote:", file=sys.stderr)
-        print(f"  • {md_path}", file=sys.stderr)
-        print(f"  • {jsonl_path}", file=sys.stderr)
-        print(f"  • {meta_path}", file=sys.stderr)
-
+        if args.verbose:
+            print("[ok] wrote:", file=sys.stderr)
+            print(f"  • {md_path}", file=sys.stderr)
+            print(f"  • {jsonl_path}", file=sys.stderr)
+            print(f"  • {meta_path}", file=sys.stderr)
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
