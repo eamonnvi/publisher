@@ -13,10 +13,16 @@ improvement*/*
 overview*/*
 palace_env
 Drafts/*
+Edited/*
+Inputs/*
+Reports/*
 summaries*/*
+scripts/*
 run.log
 Output/*
 outputs/*
+outputs-26aug2025/*
+batch-fetch-tsvs/*
 # Ignore compiled Python files
 __pycache__/
 *.pyc
@@ -24,4 +30,5 @@ __pycache__/
 *.log
 TPV*
 .DS_Store
-
+batch_ids*
+cli_range.patch
