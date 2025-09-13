@@ -134,6 +134,27 @@ PROMPTS: Dict[str, Any] = {
         ),
     },
 
+    # --- Marketing ---
+    "kdp_description": {
+        "system": (
+            "You are an experienced publishing copywriter.\n"
+            "Write a compelling Amazon KDP product description for the given draft text.\n"
+            "- DO NOT include plot spoilers.\n"
+            "- Highlight atmosphere, themes, style, and emotional appeal.\n"
+            "- Use vivid but truthful language.\n"
+            "- End with a hook that encourages the reader to want more."
+        ),
+        "user": (
+            "Book/section title: {heading}\n\n"
+            "Draft:\n{body}\n\n"
+            "Tone controls:\n"
+            "- English variant: {english_variant}\n"
+            "- Style: {style}\n"
+            "- Emphasis: {emphasis}\n\n"
+            "Please weave these tone instructions into the description naturally, "
+            "while keeping it concise (max 200 words)."
+        ),
+    },
     # --- Overviews ---
     "overview": {
         "system": "You write editorial overviews.",
@@ -182,11 +203,18 @@ def render_prompt_text(mode: str, heading: str, body: str, **extras) -> str:
     if spec is None:
         raise KeyError(f"Unknown mode: {mode!r}")
 
+    # Defaults so tone placeholders always have values unless overridden
+    defaults = {
+        "english_variant": "British English",
+        "style": "understated",
+        "emphasis": "character-driven",
+    }
+    merged = {**defaults, **(extras or {})}
+
     # Allow legacy string prompts
     if isinstance(spec, str):
-        # targeted replace
         s = spec.replace("{heading}", heading).replace("{body}", body)
-        for k, v in (extras or {}).items():
+        for k, v in merged.items():
             s = s.replace("{" + k + "}", str(v))
         return s
 
@@ -196,7 +224,7 @@ def render_prompt_text(mode: str, heading: str, body: str, **extras) -> str:
     def _subst(s: str) -> str:
         s = (s or "")
         s = s.replace("{heading}", heading).replace("{body}", body)
-        for k, v in (extras or {}).items():
+        for k, v in merged.items():
             s = s.replace("{" + k + "}", str(v))
         return s.strip()
 
@@ -209,6 +237,7 @@ def render_prompt_text(mode: str, heading: str, body: str, **extras) -> str:
     if usr_txt:
         parts.append(usr_txt)
     return "\n\n".join(parts)
+
 
 # Keep compatibility alias
 build_prompt = render_prompt_text
