@@ -98,14 +98,21 @@ PROMPTS: Dict[str, Any] = {
         ),
     },
     "copyedit_suggestions": {
-        "system": "You are a UK-English line editor. Provide actionable copyediting suggestions.",
+        "system": (
+            "You are a UK-English line editor. Identify typos and missing punctuation in the supplied text. Use UK-English spelling. "
+        ),
         "user": (
             "# Heading\n{heading}\n\n"
             "# Text\n{body}\n\n"
             "## Output format\n"
-            "### Summary\n- 2–4 bullets on overall issues.\n\n"
-            "### Line edits\nGive 5–12 concrete suggestions as bullets with **Issue / Before / After / Why**.\n\n"
-            "Rules: Keep UK spelling and voice; don’t invent plot facts."
+            "- Respond in Markdown.\n"
+            "- Line edits section with a bulleted list (5–12 items). Each bullet should use bold labels in the following structure:\n"
+            "  - **Issue:** Briefly state the specific editing concern\n"
+            "  - **Before:** Original text excerpt\n"
+            "  - **After:** Revised text excerpt\n"
+            "  - **Why:** Explanation for the suggested change\n\n"
+    "Guidelines: Retain all existing plot facts; avoid introducing new content.\n\n"
+    "After generating suggestions, quickly review your edits to ensure clarity, adherence to UK style, and accurate application of your recommendations. If any issues are detected, make a minimal correction before finalising your output."
         ),
     },
     "copyedit_json": {
