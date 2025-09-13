@@ -13,6 +13,7 @@ improvement*/*
 overview*/*
 palace_env
 Drafts/*
+TPV-drafts/*
 Edited/*
 Inputs/*
 Reports/*
@@ -20,7 +21,7 @@ summaries*/*
 scripts/*
 run.log
 Output/*
-outputs/*
+outputs*/*
 outputs-26aug2025/*
 batch-fetch-tsvs/*
 # Ignore compiled Python files

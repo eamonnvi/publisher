@@ -4,11 +4,11 @@
 
 set -euo pipefail
 
-DRAFT="${DRAFT:-TPV-28aug2025.md}"
+DRAFT="${DRAFT:-TPV-edited-pdf.md}"
 MODE="${MODE:-copyedit_suggestions}"
-MODEL="${MODEL:-gpt-4.1}"
+MODEL="${MODEL:-gpt-4.1-mini}"
 # Edit these to taste
-RANGES=("1 10" "11 20" "21 30" "31 40" "41 46")
+RANGES=("1 3")
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTFILE="batch_ids_${STAMP}.tsv"
