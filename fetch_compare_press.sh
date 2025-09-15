@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 # fetch_compare_press.sh
 # Fetches batches listed in a TSV and writes per-range comparison diffs.
-# Expected columns (tab OR space separated):
-#   range   model   batch_id   outdir
-# Lines starting with '#' and header rows are ignored.
+# Expected columns (tab or space separated, header lines allowed):
+#   range    model    batch_id    outdir
 #
 # Usage:
-#   fetch_compare_press.sh SUBMIT_TSV [--mode MODE] [--poll] [--wait SECONDS] [--every SECONDS] \
+#   fetch_compare_press.sh SUBMIT_TSV [--mode MODE] [--poll] [--wait SECONDS] [--every SECONDS]
 #                                    [--english-variant "British English"] [--style STYLE] [--emphasis EMPHASIS]
+#
+# Improvements in this version:
+# - Auto-retry if the fetch yields no outputs yet (even after --poll) — configurable via RETRY_WAIT/RETRY_SLEEP
+# - Auto-basename per range/model/mode: R<range>.<mode>.<model>.md
 
 set -euo pipefail
-trap 'echo; echo "[info] interrupted"; exit 130' INT
 
 TSV="${1:?Usage: $0 SUBMIT_TSV [--mode MODE] [--poll] [--wait SECONDS] [--every SECONDS] [--english-variant ..] [--style ..] [--emphasis ..] }"
 shift || true
 
-# ---------- defaults ----------
+trap 'echo; echo "[info] interrupted"; exit 130' INT
+
+# Defaults
 POLL=false
 WAIT=0
 EVERY=5
@@ -23,13 +27,11 @@ MODE="press_synopsis"
 EXTRA_ARGS=()
 TONE_SUMMARY=()
 
-# ---------- optional venv auto-activation ----------
-if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-  VENV="$HOME/Projects/Palace/palace_env/bin/activate"
-  [[ -f "$VENV" ]] && source "$VENV"
-fi
+# Auto-retry controls (in addition to --poll): 0 = infinite
+RETRY_WAIT="${RETRY_WAIT:-0}"
+RETRY_SLEEP="${RETRY_SLEEP:-10}"
 
-# ---------- parse flags ----------
+# Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --poll)  POLL=true; shift ;;
@@ -48,7 +50,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ---------- sanity ----------
+# Sanity: OpenAI key
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
   echo "[error] OPENAI_API_KEY is not set" >&2
   exit 1
@@ -65,23 +67,44 @@ if [[ ${#TONE_SUMMARY[@]} -gt 0 ]]; then
   echo "[info] Tone controls: ${TONE_SUMMARY[*]}"
 fi
 
-# ---------- helpers ----------
+# Helper: check for a markdown artifact inside OUTDIR
+_find_md() {
+  local OUTDIR="$1"
+  local MD=""
+  local META_CAND
+  META_CAND="$(ls -1 "$OUTDIR"/*.meta.json 2>/dev/null | head -n1 || true)"
+  if [[ -n "$META_CAND" ]] && command -v jq >/dev/null 2>&1; then
+    MD="$(jq -r '.outputs.markdown // empty' "$META_CAND" 2>/dev/null || true)"
+    if [[ -n "$MD" && -f "$OUTDIR/$MD" ]]; then
+      printf "%s\n" "$OUTDIR/$MD"
+      return 0
+    fi
+  fi
+  # Fallback: first .md
+  MD="$(ls -1 "$OUTDIR"/*.md 2>/dev/null | head -n1 || true)"
+  [[ -n "$MD" ]] && printf "%s\n" "$MD" || true
+  return 0
+}
+
+# Helper: fetch one batch id into its outdir and record md path (with auto-retry & auto-basename)
 fetch_one() {
   local RANGE="$1"
   local MODEL="$2"
   local BATCH_ID="$3"
-  local OUTDIR="$4"
+  local OUTDIR_IN="$4"
 
-  # If TSV recorded ".../batch_input.jsonl", strip it to get the folder.
+  # Normalize OUTDIR
+  local OUTDIR="$OUTDIR_IN"
   if [[ "$OUTDIR" == */batch_input.jsonl ]]; then
     OUTDIR="$(dirname "$OUTDIR")"
   fi
   mkdir -p "$OUTDIR"
 
-  # Nice basename for outputs (avoids DUMMY.*)
-  local BASENAME="R${RANGE// /-}.${MODE}.${MODEL}"
+  # Auto-basename: R<range>.<mode>.<model>
+  local SAFE_RANGE="${RANGE// /-}"
+  local BASENAME="R${SAFE_RANGE}.${MODE}.${MODEL}"
 
-  # Build CLI args
+  # Build fetch args
   local FETCH_ARGS=( --mode "$MODE" --outdir "$OUTDIR" --fetch-id "$BATCH_ID" --model "$MODEL" --basename "$BASENAME" )
   if $POLL; then
     FETCH_ARGS+=( --poll --wait "$WAIT" --every "$EVERY" )
@@ -91,66 +114,74 @@ fetch_one() {
   fi
 
   echo "[info] fetching ${RANGE} | ${MODEL} | ${BATCH_ID} → ${OUTDIR} (mode=${MODE})" >&2
-  if ! python3 novel_toolkit_cli.py DUMMY.md "${FETCH_ARGS[@]}" 1>/dev/null; then
-    echo "[warn] fetch failed for ${BATCH_ID}; continuing to look for artifacts…" >&2
-  fi
 
-  # Prefer meta.json → outputs.markdown, fall back to first *.md
-  local META_CAND MD
-  META_CAND="$(ls -1 "$OUTDIR"/*.meta.json 2>/dev/null | head -n1 || true)"
-  if [[ -n "$META_CAND" ]] && command -v jq >/dev/null 2>&1; then
-    MD="$(jq -r '.outputs.markdown // empty' "$META_CAND" 2>/dev/null || true)"
-    if [[ -n "$MD" && -f "$OUTDIR/$MD" ]]; then
-      echo -e "${RANGE}\t${MODEL}\t${OUTDIR}/${MD}" >> "$TRIPLE_LIST"
-      return 0
-    fi
-  fi
-  MD="$(ls -1 "$OUTDIR"/*.md 2>/dev/null | head -n1 || true)"
-  if [[ -n "$MD" ]]; then
-    echo -e "${RANGE}\t${MODEL}\t${MD}" >> "$TRIPLE_LIST"
+  # Attempt 1
+  python3 novel_toolkit_cli.py DUMMY.md "${FETCH_ARGS[@]}" 1>/dev/null || true
+
+  # Check for md
+  local MD_PATH
+  MD_PATH="$(_find_md "$OUTDIR")"
+  if [[ -n "$MD_PATH" ]]; then
+    echo -e "${RANGE}\t${MODEL}\t${MD_PATH}" >> "$TRIPLE_LIST"
     return 0
   fi
+
+  # Auto-retry loop (in addition to --poll). RETRY_WAIT=0 => infinite.
+  local start now elapsed
+  start="$(date +%s)"
+  while : ; do
+    # Decide if we should keep trying
+    now="$(date +%s)"; elapsed=$(( now - start ))
+    if [[ "$RETRY_WAIT" -ne 0 && "$elapsed" -ge "$RETRY_WAIT" ]]; then
+      break
+    fi
+    sleep "$RETRY_SLEEP"
+    python3 novel_toolkit_cli.py DUMMY.md "${FETCH_ARGS[@]}" 1>/dev/null || true
+    MD_PATH="$(_find_md "$OUTDIR")"
+    if [[ -n "$MD_PATH" ]]; then
+      echo -e "${RANGE}\t${MODEL}\t${MD_PATH}" >> "$TRIPLE_LIST"
+      return 0
+    fi
+  done
 
   echo "[warn] Could not locate a markdown output in ${OUTDIR}" >&2
   return 0
 }
 
-# ---------- robust TSV parsing ----------
-# Accept tabs or spaces, skip comments/blank lines and header rows anywhere.
-# Only keep rows that contain a "batch_*" token (in any column).
-# Print: <range>\t<model>\t<batch_id>\t<outdir>
-mapfile -t ROWS < <(
+# -------- Robust TSV parsing --------
+# Accept tabs or spaces. Skip comments (#...), blank lines, and header lines (where any column is 'batch_id').
+# Only keep rows where some field matches /^batch_/.
+readarray -t ROWS < <(
   awk '
-    BEGIN{OFS="\t"}
-    { sub(/\r$/,"") }                   # strip CR
-    /^[ \t]*#/ {next}                   # comments
-    NF==0 {next}                        # blanks
+    BEGIN{FS="[ \t]+"}
+    { gsub(/\r$/,"") }          # strip CR on CRLF files
+    /^[ \t]*#/ {next}           # comments
+    NF==0 {next}                # blank
     {
-      # Split on runs of tabs/spaces to normalize
-      n=split($0, a, /[ \t]+/)
-      # Detect header if any field (case-insensitive) equals "batch_id"
+      # header if any field equals batch_id (case-insensitive)
       hdr=0
-      for(i=1;i<=n;i++){
-        t=a[i]; gsub(/[ \t]/,"",t); tl=toupper(t)
-        if(tl=="BATCH_ID"){hdr=1;break}
-      }
+      for(i=1;i<=NF;i++){t=$i; gsub(/[ \t]/,"",t); if(tolower(t)=="batch_id"){hdr=1}}
       if(hdr){next}
 
-      # Find batch_id token position and build fields around it.
-      bi=0
-      for(i=1;i<=n;i++){ if(a[i] ~ /^batch_[A-Za-z0-9]+$/){ bi=i; break } }
-      if(bi==0){ next }                 # skip if no batch id token
+      # Determine range & model positions:
+      # if first two tokens are ints => "start end" range; model at $3; batch id somewhere from $4+
+      isint1 = ($1 ~ /^[0-9]+$/)
+      isint2 = ($2 ~ /^[0-9]+$/)
+      if(isint1 && isint2 && NF>=3){
+        rng=$1" "$2; mdl=$3; k=4
+      } else {
+        rng=$1; mdl=(NF>=2?$2:""); k=3
+      }
 
-      # RANGE: if first two fields are integers → "X Y", else just field 1
-      isint1=(a[1] ~ /^[0-9]+$/)
-      isint2=(a[2] ~ /^[0-9]+$/)
-      if(isint1 && isint2){ range=a[1] " " a[2]; model=a[3] }
-      else { range=a[1]; model=(n>=2?a[2]:"") }
+      # find batch id in the remainder
+      bid=""
+      for(i=k;i<=NF;i++){ if($i ~ /^batch_[A-Za-z0-9]+$/){ bid=$i; break } }
+      if(bid==""){ next }
 
-      batch=a[bi]
-      outdir=(bi<n ? a[bi+1] : "")
+      outdir=""
+      if(i<NF){ outdir=$(i+1) }   # take next token if present
 
-      print range, model, batch, outdir
+      print rng "\t" mdl "\t" bid "\t" outdir
     }
   ' "$TSV"
 )
@@ -162,23 +193,17 @@ fi
 
 echo "[info] fetching range | model | batch_id → outdir (mode=${MODE})"
 
-# ---------- fetch all rows ----------
+# Process rows
 for ROW in "${ROWS[@]}"; do
-  # Split the normalized row (always tab-separated now)
   IFS=$'\t' read -r RANGE MODEL BATCH_ID OUTDIR <<<"$ROW"
-  if [[ -z "${BATCH_ID:-}" || -z "${OUTDIR:-}" ]]; then
+  if [[ -z "$BATCH_ID" || -z "$OUTDIR" ]]; then
     echo "[warn] Skipping row (missing batch_id or outdir): $ROW" >&2
     continue
-  fi
-  # Normalize outdir by stripping trailing /batch_input.jsonl if present
-  if [[ "$OUTDIR" == */batch_input.jsonl ]]; then
-    OUTDIR="${OUTDIR%/batch_input.jsonl}"
   fi
   fetch_one "$RANGE" "$MODEL" "$BATCH_ID" "$OUTDIR"
 done
 
-# ---------- build comparisons per range ----------
-# Keep multi-word ranges intact
+# Build comparisons per range (preserve "1 8" as a single range key)
 RANGES=()
 while IFS= read -r rng; do
   [[ -n "$rng" ]] && RANGES+=("$rng")
@@ -191,29 +216,16 @@ if [[ ${#RANGES[@]} -eq 0 ]]; then
 fi
 
 for R in "${RANGES[@]}"; do
-  # Collect all (model, path) rows for this range
   mapfile -t LINES < <(awk -F'\t' -v r="$R" 'NR>1 && $1==r {print $0}' "$TRIPLE_LIST")
-
-  # Need at least two different models to compare
   if [[ ${#LINES[@]} -lt 2 ]]; then
     echo "[note] Range '$R' has <2 outputs; skipping diff." >&2
     continue
   fi
 
-  # Pick first two rows (distinct models) for a single diff
   M1=$(echo "${LINES[0]}" | awk -F'\t' '{print $2}')
   P1=$(echo "${LINES[0]}" | awk -F'\t' '{print $3}')
-  M2=""
-  P2=""
-  for i in "${!LINES[@]}"; do
-    mm=$(echo "${LINES[$i]}" | awk -F'\t' '{print $2}')
-    pp=$(echo "${LINES[$i]}" | awk -F'\t' '{print $3}')
-    if [[ "$mm" != "$M1" ]]; then M2="$mm"; P2="$pp"; break; fi
-  done
-  if [[ -z "$M2" ]]; then
-    echo "[note] Range '$R' only produced one model; skipping diff." >&2
-    continue
-  fi
+  M2=$(echo "${LINES[1]}" | awk -F'\t' '{print $2}')
+  P2=$(echo "${LINES[1]}" | awk -F'\t' '{print $3}')
 
   SAFE_R=$(echo "$R" | tr ' ' '-' | tr '/' '-')
   DIFF_OUT="${COMPARE_DIR}/diff_${SAFE_R}_${M1}_vs_${M2}.diff"
@@ -226,7 +238,7 @@ for R in "${RANGES[@]}"; do
   echo "[ok] wrote ${DIFF_OUT}" >&2
 done
 
-# ---------- index ----------
+# Index
 INDEX="${COMPARE_DIR}/README.txt"
 {
   echo "Model comparisons"
