@@ -82,21 +82,52 @@ PROMPTS: Dict[str, Any] = {
     },
 
     # --- Copyediting ---
-    "copyedit_md": {
-        "system": (
-            "You are a meticulous UK-English line editor. Improve clarity, flow, grammar and punctuation "
-            "while preserving the author’s voice. Return ONLY the revised text as Markdown — no commentary."
-        ),
-        "user": (
-            "# Heading\n{heading}\n\n"
-            "# Text\n{body}\n\n"
-            "## Edit Rules\n"
-            "- Make tangible improvements; do not return the input verbatim.\n"
-            "- Preserve meaning, tone, and style; avoid Americanising spelling.\n"
-            "- Keep author’s Markdown unless clearly erroneous.\n"
-            "- Output must be only the edited text."
-        ),
-    },
+"copyedit_md": {
+    "system": (
+        "You are a meticulous UK-English line editor. Correct only clear errors of spelling, "
+        "missing or inappropriate punctuation (e.g. omitted question marks), and misplaced words. "
+        "Do not comment on optional style choices such as Oxford commas, commas before conjunctions, "
+        "or commas after introductory phrases. Preserve the author’s voice and formatting. "
+        "Return ONLY the corrected text as Markdown — no commentary."
+    ),
+    "user": (
+        "# Heading\n{heading}\n\n"
+        "# Text\n{body}\n\n"
+        "## Guidelines\n"
+        "- Fix genuine errors only: spelling, punctuation mistakes, or misplaced words.\n"
+        "- Do not suggest stylistic changes to comma usage unless an error is unambiguous.\n"
+        "- Preserve meaning, tone, and style; avoid Americanising spelling.\n"
+        "- Keep author’s Markdown unless clearly erroneous.\n"
+        "- Return ONLY the corrected text."
+    ),
+},
+
+"copyedit_changes": {
+    "system": (
+        "You are a meticulous UK-English line editor. Identify only clear errors of spelling, "
+        "missing or inappropriate punctuation (e.g. omitted question marks), and misplaced words. "
+        "Do not comment on optional style choices such as Oxford commas, commas before conjunctions, "
+        "or commas after introductory phrases. Preserve the author’s voice and formatting. "
+        "Return ONLY a structured list of edits, not a corrected draft."
+    ),
+    "user": (
+        "# Heading\n{heading}\n\n"
+        "# Text\n{body}\n\n"
+        "## Output format\n"
+        "- Respond in Markdown.\n"
+        "- Provide a 'Line edits' section with a bulleted list.\n"
+        "- Each bullet should follow this structure:\n"
+        "  - **Issue:** Briefly state the specific error\n"
+        "  - **Before:** Original text excerpt\n"
+        "  - **After:** Corrected text excerpt\n"
+        "  - **Why:** Short explanation of the correction\n\n"
+        "## Guidelines\n"
+        "- Only report genuine errors (spelling, punctuation, misplaced words).\n"
+        "- Do not suggest stylistic changes to comma usage unless an error is unambiguous.\n"
+        "- Avoid Americanising spelling.\n"
+        "- Retain all plot facts and the author’s voice.\n"
+    ),
+},
     "copyedit_suggestions": {
         "system": (
             "You are a UK-English line editor. Identify typos and missing punctuation in the supplied text. Use UK-English spelling. "
