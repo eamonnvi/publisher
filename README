@@ -1,0 +1,14 @@
+⚠️ Deprecation Notice: submit_batches.sh
+
+The legacy wrapper script submit_batches.sh has been deprecated.
+It remains in the repository only as a compatibility shim:
+	•	When invoked, it prints a warning.
+	•	It then forwards all arguments to submit_ranges.sh.
+	•	Exit codes and behaviour are identical to submit_ranges.sh.
+
+Recommended replacement:
+
+./submit_ranges.sh --draft FILE --mode MODE --models m1[,m2] --ranges "A B;C D"
+
+Removal timeline: the shim will be removed in a future release. Please update any scripts or automation to call submit_ranges.sh directly.
+

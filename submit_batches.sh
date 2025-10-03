@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # submit_batches.sh — DEPRECATED shim → submit_ranges.sh
 # Deprecated: 2025-10-03
+# DEPRECATED: use submit_ranges.sh instead (this shim will be removed in a future release)
 
 set -u
 
