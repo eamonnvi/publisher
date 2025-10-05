@@ -21,6 +21,8 @@ summaries*/*
 scripts/*
 run.log
 Output/*
+Batch-Outputs/*
+script-baks/*
 outputs*/*
 outputs-26aug2025/*
 batch-fetch-tsvs/*

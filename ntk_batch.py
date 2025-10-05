@@ -47,6 +47,7 @@ def run_batch(
                 "model": model,
                 "input": prompt,
                 "max_output_tokens": max_output_tokens,
+                "response_format": {"type": "text"},  # <- stabilise output shape
             }
     else:
         endpoint = "/v1/chat/completions"
@@ -84,6 +85,14 @@ def run_batch(
         json.dumps(id_to_heading, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    # Optional: persist sections so a rebatch can recreate prompts for selected cids
+    try:
+        (out_dir / "sections.json").write_text(
+            json.dumps(sections, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
     if verbose:
         print(f"[batch] wrote {count} lines -> {ndjson_path}", file=sys.stderr)
