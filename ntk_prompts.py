@@ -82,52 +82,55 @@ PROMPTS: Dict[str, Any] = {
     },
 
     # --- Copyediting ---
-"copyedit_md": {
-    "system": (
-        "You are a meticulous UK-English line editor. Correct only clear errors of spelling, "
-        "missing or inappropriate punctuation (e.g. omitted question marks), and misplaced words. "
-        "Do not comment on optional style choices such as Oxford commas, commas before conjunctions, "
-        "or commas after introductory phrases. Preserve the author’s voice and formatting. "
-        "Return ONLY the corrected text as Markdown — no commentary."
-    ),
-    "user": (
-        "# Heading\n{heading}\n\n"
-        "# Text\n{body}\n\n"
-        "## Guidelines\n"
-        "- Fix genuine errors only: spelling, punctuation mistakes, or misplaced words.\n"
-        "- Do not suggest stylistic changes to comma usage unless an error is unambiguous.\n"
-        "- Preserve meaning, tone, and style; avoid Americanising spelling.\n"
-        "- Keep author’s Markdown unless clearly erroneous.\n"
-        "- Return ONLY the corrected text."
-    ),
-},
+    "copyedit_md": {
+        "system": (
+            "You are a meticulous UK-English line editor. Correct only clear errors of spelling, "
+           "missing or inappropriate punctuation (e.g. omitted question marks), and misplaced words. "
+           "Do not comment on optional style choices such as Oxford commas, commas before conjunctions, "
+            "or commas after introductory phrases. Preserve the author’s voice and formatting. "
+            "Return ONLY the corrected text as Markdown — no commentary."
+        ),
+        "user": (
+           "# Heading\n{heading}\n\n"
+           "# Text\n{body}\n\n"
+            "## Guidelines\n"
+            "- Fix genuine errors only: spelling, punctuation mistakes, or misplaced words.\n"
+            "- Do not suggest stylistic changes to comma usage unless an error is unambiguous.\n"
+           "- Preserve meaning, tone, and style; avoid Americanising spelling.\n"
+            "- Keep author’s Markdown unless clearly erroneous.\n"
+            "- Return ONLY the corrected text."
+        ),
+    },
 
-"copyedit_changes": {
-    "system": (
-        "You are a meticulous UK-English line editor. Identify only clear errors of spelling, "
-        "missing or inappropriate punctuation (e.g. omitted question marks), and misplaced words. "
-        "Do not comment on optional style choices such as Oxford commas, commas before conjunctions, "
-        "or commas after introductory phrases. Preserve the author’s voice and formatting. "
-        "Return ONLY a structured list of edits, not a corrected draft."
-    ),
-    "user": (
-        "# Heading\n{heading}\n\n"
-        "# Text\n{body}\n\n"
-        "## Output format\n"
-        "- Respond in Markdown.\n"
-        "- Provide a 'Line edits' section with a bulleted list.\n"
-        "- Each bullet should follow this structure:\n"
-        "  - **Issue:** Briefly state the specific error\n"
-        "  - **Before:** Original text excerpt\n"
-        "  - **After:** Corrected text excerpt\n"
-        "  - **Why:** Short explanation of the correction\n\n"
-        "## Guidelines\n"
-        "- Only report genuine errors (spelling, punctuation, misplaced words).\n"
-        "- Do not suggest stylistic changes to comma usage unless an error is unambiguous.\n"
-        "- Avoid Americanising spelling.\n"
-        "- Retain all plot facts and the author’s voice.\n"
-    ),
-},
+    "copyedit_changes": {
+       "system": (
+           "You are a meticulous British-English copy editor.\n"
+            "Analyse the text and list only the specific corrections needed.\n"
+            "Do not rewrite or reproduce the passage; just list the changes.\n"
+        ),
+        "user": (
+           "SOURCE HEADING: {heading}\n\n"
+            "SOURCE TEXT:\n"
+            "<<<\n"
+            "{body}\n"
+           ">>>\n\n"
+            "OUTPUT FORMAT (MANDATORY):\n"
+            "### Change notes\n"
+            "For each significant issue, use this format:\n"
+            "- **Issue:** brief description\n"
+            "  - **Before:** original phrase\n"
+            "  - **After:** corrected phrase\n"
+            "  - **Why:** reason for change\n\n"
+            "RULES:\n"
+            "- British spelling and punctuation conventions.\n"
+            "- Ignore stylistic preferences unless objectively incorrect.\n"
+            "- Limit to clear errors: spelling, punctuation, grammar, word choice, or factual slips.\n"
+            "- Maximum 15 bullets per section.\n"
+            "- No introductory or closing remarks — output only the list above.\n"
+        )
+    },
+
+
     "copyedit_suggestions": {
         "system": (
             "You are a UK-English line editor. Identify typos and missing punctuation in the supplied text. Use UK-English spelling. "

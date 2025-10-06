@@ -140,11 +140,11 @@ def main():
     # FETCH-ONLY PATH (no splitting)
     # -------------------------------
     if args.fetch_id:
-        # Use --outdir as the destination (recommended to point to the original submit folder)
+        # Use --outdir as the destination (recommend pointing to batch_.../outputs)
         run_dir = Path(args.outdir)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load optional id→heading map
+        # Load optional id→heading map (for later, if we parse outputs)
         map_path = run_dir / "batch_map.json"
         batch_map = {}
         if map_path.exists():
@@ -158,6 +158,7 @@ def main():
 
         client = OpenAI()
 
+        # Retrieve / poll
         if args.poll:
             if args.verbose:
                 print(f"[batch] polling {args.fetch_id} until completion…", file=sys.stderr)
@@ -166,10 +167,10 @@ def main():
             info = get_batch_status(client, args.fetch_id)
 
         st = info.get("status")
-        # Always write a submitted.json (or update it) in the fetch dir for traceability
+        # Always (re)write submitted.json for traceability
         (run_dir / "submitted.json").write_text(
             json.dumps({
-                "draft": str(draft_path.name),
+                "draft": str(Path(args.draft).name),
                 "mode": args.mode,
                 "model": args.model,
                 "max_output_tokens": args.max_output_tokens,
@@ -180,51 +181,102 @@ def main():
             encoding="utf-8",
         )
 
+        # Early exit when not completed
         if st != "completed":
             print(f"[warn] batch status = {st}. Try again later or use --poll.", file=sys.stderr)
-            return
+            return 0
 
         out_id = info.get("output_file_id")
-        if not out_id:
-            print("[error] completed but no output_file_id", file=sys.stderr)
-            return
+        err_id = info.get("error_file_id")
 
-        raw = _download_file_bytes(client, out_id)
-        (run_dir / "batch_output.raw.ndjson").write_bytes(raw)
+        # Case A: successes present → current path
+        if out_id:
+            raw = _download_file_bytes(client, out_id)
+            (run_dir / "batch_output.raw.ndjson").write_bytes(raw)
 
-        triples = parse_batch_output_ndjson(raw, batch_map)
+            triples = parse_batch_output_ndjson(raw, batch_map)
 
-        # Build output filenames and title
-        stem = args.basename or f"{draft_path.stem}.{args.mode}.{args.model}"
-        md_path = run_dir / f"{stem}.md"
-        jsonl_path = run_dir / f"{stem}.jsonl"
-        meta_path = run_dir / f"{stem}.meta.json"
-        title = ("Copyedit Report" if args.mode.startswith("copyedit")
-                 else "Concise Report" if args.mode.startswith("concise")
-                 else args.mode.replace("_", " ").title())
+            stem = args.basename or f"{Path(args.draft).stem}.{args.mode}.{args.model}"
+            md_path = run_dir / f"{stem}.md"
+            jsonl_path = run_dir / f"{stem}.jsonl"
+            meta_path = run_dir / f"{stem}.meta.json"
+            title = ("Copyedit Report" if args.mode.startswith("copyedit")
+                     else "Concise Report" if args.mode.startswith("concise")
+                     else args.mode.replace("_", " ").title())
 
-        write_markdown([(h, t) for (h, t, _) in triples], md_path, title)
-        write_jsonl([(h, t) for (h, t, _) in triples], jsonl_path)
+            write_markdown([(h, t) for (h, t, _) in triples], md_path, title)
+            write_jsonl([(h, t) for (h, t, _) in triples], jsonl_path)
 
-        meta = {
-            "draft": str(draft_path.name),
-            "mode": args.mode,
-            "model": args.model,
-            "max_output_tokens": args.max_output_tokens,
-            "batch_id": args.fetch_id,
-            "batch_status": st,
-            "outdir": str(run_dir.resolve()),
-            "num_items": len(triples),
-            "outputs": {
-                "markdown": md_path.name,
-                "jsonl": jsonl_path.name,
-            },
-        }
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            meta = {
+                "draft": str(Path(args.draft).name),
+                "mode": args.mode,
+                "model": args.model,
+                "max_output_tokens": args.max_output_tokens,
+                "batch_id": args.fetch_id,
+                "batch_status": st,
+                "outdir": str(run_dir.resolve()),
+                "num_items": len(triples),
+                "outputs": {
+                    "markdown": md_path.name,
+                    "jsonl": jsonl_path.name,
+                },
+            }
+            meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-        if args.verbose:
-            print(f"[ok] fetched batch into {run_dir}", file=sys.stderr)
-        return
+            if args.verbose:
+                print(f"[ok] fetched batch into {run_dir}", file=sys.stderr)
+            return 0
+
+        # Case B: no successes, but errors exist → write an error summary
+        if err_id:
+            raw_err = _download_file_bytes(client, err_id)
+            (run_dir / "batch_errors.raw.ndjson").write_bytes(raw_err)
+
+            # Make a human summary (custom_id -> message) for quick triage
+            lines = []
+            num_err = 0
+            for ln in raw_err.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln.decode("utf-8") if isinstance(ln, (bytes, bytearray)) else ln)
+                except Exception:
+                    continue
+                cid = rec.get("custom_id", "?")
+                err = rec.get("error") or {}
+                msg = err.get("message") or err.get("type") or str(err) or "unknown error"
+                lines.append(f"{cid}\t{msg}")
+                num_err += 1
+
+            (run_dir / "errors_summary.txt").write_text("\n".join(lines), encoding="utf-8")
+
+            meta = {
+                "draft": str(Path(args.draft).name),
+                "mode": args.mode,
+                "model": args.model,
+                "max_output_tokens": args.max_output_tokens,
+                "batch_id": args.fetch_id,
+                "batch_status": st,
+                "outdir": str(run_dir.resolve()),
+                "num_items": 0,
+                "num_errors": num_err,
+                "outputs": {
+                    "errors_raw": "batch_errors.raw.ndjson",
+                    "errors_summary": "errors_summary.txt",
+                },
+            }
+            (run_dir / f"{(args.basename or f'{Path(args.draft).stem}.{args.mode}.{args.model}')} .meta.json".replace("  ", " ")).write_text(
+                json.dumps(meta, indent=2), encoding="utf-8"
+            )
+
+            print(f"[error] completed but no output_file_id; wrote {num_err} errors to errors_summary.txt", file=sys.stderr)
+            return 2
+
+        # Case C: neither output nor error file ID (unexpected but handle)
+        print("[error] completed but neither output_file_id nor error_file_id present", file=sys.stderr)
+        return 2
+
 
     # --------------------------------
     # NORMAL (SYNC or SUBMIT) PATHS
@@ -255,16 +307,23 @@ def main():
         # Compute run_dir first; we’ll write into it and save submitted.json here
         run_dir = _compute_run_dir(draft_path, args)
 
-        # Submit the batch (run_batch writes batch_input.jsonl and batch_map.json)
-        batch_id = run_batch(
-            sections=sections,
-            mode=args.mode,
-            model=args.model,
-            out_dir=run_dir,
-            max_output_tokens=args.max_output_tokens,
-            verbose=args.verbose,
-        )
-        # Persist submit metadata
+        # Submit the batch (run_batch writes batch_input.jsonl and batch_map.json into run_dir)
+        try:
+            batch_id = run_batch(
+                sections=sections,
+                mode=args.mode,
+                model=args.model,
+                out_dir=run_dir,  # <- use the computed run_dir, not args.outdir
+                max_output_tokens=args.max_output_tokens or 800,
+                verbose=args.verbose,
+            )
+        except RuntimeError as e:
+            if str(e) == "empty-batch":
+                print("[warn] No lines to submit in this range; skipping batch upload.", file=sys.stderr)
+                return 0
+            raise
+
+        # Persist submit metadata (always write this after a successful submit)
         (run_dir / "submitted.json").write_text(
             json.dumps({
                 "draft": str(draft_path.name),
@@ -281,7 +340,8 @@ def main():
         # Don’t fetch here; user can run a separate fetch with --fetch-id and the same --outdir
         if args.verbose:
             print(f"[warn] batch status = validating. Fetch later with --fetch-id {batch_id}.", file=sys.stderr)
-        return
+        return 0
+
 
     # Synchronous mode (no batch)
     triples = run_sync_collect(

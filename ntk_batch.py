@@ -36,19 +36,36 @@ def run_batch(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ndjson_path = out_dir / "batch_input.jsonl"
+    run_tag = time.strftime("%Y%m%d_%H%M%S")  # uniqueness for this submit
+
 
     # Endpoint + request body factory
     if _is_gpt5(model):
         endpoint = "/v1/responses"
 
         def make_body(prompt: str) -> Dict[str, Any]:
-            # Responses API uses max_output_tokens. Do not set temperature for gpt-5.
+            # Responses API (gpt-5*): text-centric, low/no reasoning, UK copyedit
             return {
                 "model": model,
-                "input": prompt,
-                "max_output_tokens": max_output_tokens,
-                "response_format": {"type": "text"},  # <- stabilise output shape
+                "input": [
+                    {"role": "system", "content": "You are a careful copy editor. Output only plain text in the requested sections."},
+                    {"role": "user", "content": prompt},
+                ],
+                # Allow a decent budget; 5-mini sometimes needs room
+                "max_output_tokens": min(int(max_output_tokens or 0) or 1800, 3000),
+                # Steer away from hidden chain-of-thought
+                "reasoning": {"effort": "low"},   # try "none" if accepted in your SDK
+                # Tell the Responses API we want *text* output
+                "text": {
+                    "format": {"type": "text"},
+                    "verbosity": "low",
+                },
+                # Do NOT pass temperature for gpt-5*
             }
+
+
+
+
     else:
         endpoint = "/v1/chat/completions"
 
@@ -69,7 +86,9 @@ def run_batch(
             if not (body or "").strip():
                 continue
             prompt = render_prompt_text(mode, heading, body)
-            cid = f"sec_{idx:04d}"
+            # Add a per-run suffix to make ids idempotent across retries/batches.
+            cid = f"sec_{idx:04d}__{run_tag}"            
+
             obj = {
                 "custom_id": cid,
                 "method": "POST",
@@ -97,6 +116,14 @@ def run_batch(
     if verbose:
         print(f"[batch] wrote {count} lines -> {ndjson_path}", file=sys.stderr)
         print(f"[batch] wrote batch_map.json ({len(id_to_heading)} entries)", file=sys.stderr)
+
+    # Guard: do not upload empty NDJSONs; warn on very large ones.
+    if count == 0:
+        print(f"[warn] {ndjson_path} has 0 lines; skipping batch upload.", file=sys.stderr)
+        # Raise a controlled error; the shell wrappers tolerate no-batch-id rows.
+        raise RuntimeError("empty-batch")
+    if count > 200:
+        print(f"[warn] NDJSON contains {count} lines; consider smaller ranges for better resilience.", file=sys.stderr)
 
     # Submit the batch
     file_obj = client.files.create(file=ndjson_path.open("rb"), purpose="batch")
@@ -165,46 +192,85 @@ def _download_file_bytes(client: OpenAI, file_id: str) -> bytes:
 def _extract_text_from_responses_body(body: Dict[str, Any]) -> str:
     """
     Extract assistant text from a /v1/responses body.
-    Tries output_text first, then walks 'output' blocks.
+    Handles multiple shapes seen in the field.
+
+    Known shapes:
+      A) {"output_text": "..."}
+      B) {"text": "..."}                          # some SDKs
+      C) {"output": [{"type":"message","content":[{"type":"text","text":"..."}]}]}
+      D) {"output": [{"type":"message","content":[{"type":"output_text","text":"..."}]}]}
+      E) {"output": [{"type":"output_text","text":"..."}]}
+      F) {"output": [{"text":"..."}]}             # minimal
+      G) {"message": {"content": "..."}}
     """
-    # Fast path
-    t = body.get("output_text")
-    if isinstance(t, str) and t.strip():
-        return t.strip()
+    # A / B — direct fields
+    for k in ("output_text", "text"):
+        t = body.get(k)
+        if isinstance(t, str) and t.strip():
+            return t.strip()
 
-    # Some SDKs place text under 'text'
-    t = body.get("text")
-    if isinstance(t, str) and t.strip():
-        return t.strip()
-
-    # Walk the 'output' list-of-blocks
     out = body.get("output")
+
+    # E / F — top-level blocks with text
     if isinstance(out, list):
-        # Try message content with text fragments
         for block in out:
-            if isinstance(block, dict) and block.get("type") == "message":
+            if not isinstance(block, dict):
+                continue
+            # E: explicit output_text block
+            if block.get("type") == "output_text":
+                txt = block.get("text")
+                if isinstance(txt, str) and txt.strip():
+                    return txt.strip()
+            # F: minimal block with a direct "text" field
+            txt = block.get("text")
+            if isinstance(txt, str) and txt.strip():
+                return txt.strip()
+
+        # C / D — message blocks with a list of content items
+        for block in out:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "message":
                 content = block.get("content")
                 if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict):
-                            txt = c.get("text")
-                            if isinstance(txt, str) and txt.strip():
-                                return txt.strip()
-        # Fallback: look for any 'text' or 'content' at top-level blocks
-        for block in out:
-            if isinstance(block, dict):
-                for key in ("text", "content"):
-                    v = block.get(key)
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
+                    for item in content:
+                        if not isinstance(item, dict):
+                            continue
+                        # support both {"type":"text","text":"..."} and {"type":"output_text","text":"..."}
+                        txt = item.get("text")
+                        if isinstance(txt, str) and txt.strip():
+                            return txt.strip()
+                # very defensive: some providers put a string directly under "content"
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
 
-    # As a last resort: some providers include 'output' as a dict with 'content'
-    if isinstance(out, dict):
-        v = out.get("content")
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+        # Last-ditch: nested "content" lists under non-message blocks
+        for block in out:
+            if not isinstance(block, dict):
+                continue
+            content = block.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        txt = item.get("text")
+                        if isinstance(txt, str) and txt.strip():
+                            return txt.strip()
+
+    # G — some SDKs mimic chat shape inside responses
+    msg = body.get("message")
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    txt = item.get("text")
+                    if isinstance(txt, str) and txt.strip():
+                        return txt.strip()
 
     return ""
+
 
 
 def _extract_text_from_chat_body(body: Dict[str, Any]) -> str:
